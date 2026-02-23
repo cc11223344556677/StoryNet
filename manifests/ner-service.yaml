@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ner-service
+  namespace: app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ner-service
+  template:
+    metadata:
+      labels:
+        app: ner-service
+    spec:
+      containers:
+        - name: ner-service
+          image: ner_service:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 5000
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1024Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ner-service
+  namespace: app
+spec:
+  selector:
+    app: ner-service
+  ports:
+    - port: 5000
+      targetPort: 5000
