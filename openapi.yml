@@ -275,7 +275,7 @@ components:
       properties:
         access_token:
           type: string
-          description: JWT access token. Include as `Authorization: Bearer <token>`.
+          description: JWT access token.
         refresh_token:
           type: string
         token_type:
@@ -878,7 +878,7 @@ paths:
         '422':
           $ref: '#/components/responses/UnprocessableEntity'
 
-/documents/mine:
+  /documents/mine:
     get:
       tags: [Documents]
       summary: List documents owned by the authenticated user
