@@ -1,0 +1,1299 @@
+openapi: 3.0.3
+
+info:
+  title: StoryNet API
+  version: 2.0.0
+  description: >
+    api spec for StoryNet, covering the backend API and
+    the internal apis of the pdf_service and ner_service. all public endpoints
+    require JWT authentication unless explicitly marked otherwise.
+
+tags:
+  - name: Auth
+    description: authentication and user management
+  - name: Entities
+    description: search and retrieval of entities + relationships (FtM)
+  - name: Documents
+    description: Document upload, management, and visibility
+  - name: Jobs
+    description: async processing job status
+  - name: Projects
+    description: saved project snapshots
+  - name: PDF_Service
+    description: Internal OCR endpoint (pdf_service container)
+  - name: NER_Service
+    description: Internal NER endpoint (ner_service container)
+
+servers:
+  - url: https://angles-server.ddns.net:5001/api #TODO: change this later
+    description: backend API
+  - url: http://pdf-service.app.svc.cluster.local:5001
+    description: Internal pdf_service (OCR) — not publicly reachable
+  - url: http://ner-service.app.svc.cluster.local:5000
+    description: Internal ner_service (NER/LLM) — not publicly reachable
+
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+
+    # FtM core entity (nodes and relationship entities)
+    FtMEntity:
+      type: object
+      required: [id, schema, properties]
+      properties:
+        id:
+          type: string
+          description: Stable unique identifier (hash of canonical values).
+        schema:
+          type: string
+          description: >
+            FtM core schema type. Node-like examples: Person, Organization,
+            Company, LegalEntity, Asset, Vehicle, Vessel, Aircraft, Address,
+            Passport, BankAccount. Edge-like examples: Ownership, Membership,
+            Directorship, Family, Associate, UnknownLink, Sanction, Payment.
+            This is not an exhaustive list; any valid FtM core schema is
+            accepted.
+          example: Person
+        caption:
+          type: string
+          description: >
+            Human-readable label computed from featured properties (e.g. name).
+            Read-only; computed by the backend.
+        properties:
+          type: object
+          description: >
+            Multi-valued property bag. ALL values are arrays of strings, even
+            scalar-feeling fields like name or birthDate. Property names are
+            defined by the FtM schema for this entity type. Entity-typed
+            properties (e.g. Ownership.owner) hold the IDs of other entities.
+          additionalProperties:
+            type: array
+            items:
+              type: string
+          example:
+            name: ["John Doe"]
+            nationality: ["us", "au"]
+            birthDate: ["1982"]
+        confidence:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+          description: >
+            NER confidence score assigned by the ner_service. Stored for all
+            entities regardless of value. Null only for manually created entities.
+          example: 0.87
+        public:
+          type: boolean
+          description: >
+            True if any owning user has released this entity publicly.
+            Derived from the public flags of all documents it was sourced from.
+          default: false
+        owner_ids:
+          type: array
+          description: User IDs who own at least one source document for this entity.
+          items:
+            type: string
+        provenance:
+          type: array
+          description: >
+            All document+page references that contributed to this entity.
+            An entity sourced from multiple documents will have multiple
+            provenance entries.
+          items:
+            $ref: '#/components/schemas/ProvenanceEntry'
+        first_seen:
+          type: string
+          format: date-time
+          readOnly: true
+        last_changed:
+          type: string
+          format: date-time
+          readOnly: true
+
+    ProvenanceEntry:
+      type: object
+      required: [document_id]
+      properties:
+        document_id:
+          type: string
+        page_number:
+          type: integer
+          minimum: 1
+          description: 1-indexed page number. Null for plain-text documents.
+          nullable: true
+
+    Document:
+      type: object
+      required: [id, filename, type, status, public, owner_ids]
+      properties:
+        id:
+          type: string
+        filename:
+          type: string
+        type:
+          type: string
+          enum: [text, pdf]
+        status:
+          type: string
+          enum: [queued, ocr_processing, ner_processing, completed, failed]
+        public:
+          type: boolean
+          description: >
+            True if one or more owners have released this document publicly.
+            Any owner may set this to true. Once public it can only be
+            reversed by all owners agreeing (business logic, not enforced here).
+        owner_ids:
+          type: array
+          description: IDs of all users who have uploaded this document.
+          items:
+            type: string
+        entity_count:
+          type: integer
+          description: Number of FtM entities extracted from this document.
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        error_message:
+          type: string
+          nullable: true
+          description: Present when status=failed.
+
+    JobStatus:
+      type: object
+      required: [job_id, status]
+      properties:
+        job_id:
+          type: string
+        document_id:
+          type: string
+          description: ID of the Document record created for this job.
+        status:
+          type: string
+          enum: [queued, ocr_processing, ner_processing, completed, failed]
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Estimated completion percentage.
+        message:
+          type: string
+          nullable: true
+          description: Human-readable status detail or error message.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    # Projects are stored in their entirety in MongoDB. The snapshot contains
+    # the full graph state at save time, so users always reload the exact view
+    # they saved.
+    Project:
+      type: object
+      required: [id, name, owner_id, snapshot]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        owner_id:
+          type: string
+        snapshot:
+          $ref: '#/components/schemas/ProjectSnapshot'
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    ProjectSnapshot:
+      type: object
+      description: >
+        Complete graph state saved at project-save time. Entities include both
+        node-type and edge-type FtM entities. The frontend renders this without
+        hitting the live graph database, preserving the exact saved view.
+      required: [entities, viewport]
+      properties:
+        entities:
+          type: array
+          description: All FtM entities (nodes and interstitial edges) in the graph.
+          items:
+            $ref: '#/components/schemas/FtMEntity'
+        viewport:
+          type: object
+          description: >
+            Frontend layout state (zoom level, pan position, node positions).
+            Treated as opaque by the backend.
+          additionalProperties: true
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+
+    RegisterRequest:
+      type: object
+      required: [email, password, display_name]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+          minLength: 8
+        display_name:
+          type: string
+
+    TokenResponse:
+      type: object
+      required: [access_token, token_type, expires_in]
+      properties:
+        access_token:
+          type: string
+          description: JWT access token. Include as `Authorization: Bearer <token>`.
+        refresh_token:
+          type: string
+        token_type:
+          type: string
+          enum: [Bearer]
+        expires_in:
+          type: integer
+          description: Seconds until access_token expires.
+
+    UserProfile:
+      type: object
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+          format: email
+        display_name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    EntitySearchResponse:
+      type: object
+      properties:
+        total:
+          type: integer
+        page:
+          type: integer
+        page_size:
+          type: integer
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/FtMEntity'
+
+    DocumentListResponse:
+      type: object
+      properties:
+        total:
+          type: integer
+        page:
+          type: integer
+        page_size:
+          type: integer
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/Document'
+
+    ProjectListResponse:
+      type: object
+      properties:
+        total:
+          type: integer
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/Project'
+
+    OcrRequest:
+      type: object
+      required: [document_id, file_base64, mime_type]
+      properties:
+        document_id:
+          type: string
+        file_base64:
+          type: string
+          format: byte
+          description: Base64-encoded PDF binary.
+        mime_type:
+          type: string
+          enum: [application/pdf]
+
+    OcrResponse:
+      type: object
+      required: [document_id, pages]
+      properties:
+        document_id:
+          type: string
+        pages:
+          type: array
+          description: Extracted text, one entry per page.
+          items:
+            $ref: '#/components/schemas/OcrPage'
+
+    OcrPage:
+      type: object
+      required: [page_number, text]
+      properties:
+        page_number:
+          type: integer
+          minimum: 1
+        text:
+          type: string
+
+    NerRequest:
+      type: object
+      required: [document_id, pages]
+      properties:
+        document_id:
+          type: string
+        pages:
+          type: array
+          description: >
+            Pages of text to analyse. For plain-text documents, send a single
+            entry with page_number=null.
+          items:
+            $ref: '#/components/schemas/NerInputPage'
+
+    NerInputPage:
+      type: object
+      required: [text]
+      properties:
+        page_number:
+          type: integer
+          minimum: 1
+          nullable: true
+        text:
+          type: string
+
+    NerResponse:
+      type: object
+      required: [document_id, entities]
+      properties:
+        document_id:
+          type: string
+        entities:
+          type: array
+          description: >
+            All FtM entities extracted from the document, including both
+            node-type entities (Person, Organization, etc.) and interstitial
+            edge-type entities (Ownership, Membership, etc.). Each entity
+            carries its own confidence score and provenance.
+          items:
+            $ref: '#/components/schemas/FtMEntity'
+
+    ErrorResponse:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          description: Machine-readable error code.
+          example: ENTITY_NOT_FOUND
+        message:
+          type: string
+          description: Human-readable description.
+        details:
+          type: object
+          additionalProperties: true
+          nullable: true
+
+  parameters:
+    PageParam: #for pagination of results
+      name: page
+      in: query
+      schema:
+        type: integer
+        default: 1
+        minimum: 1
+    PageSizeParam:
+      name: page_size
+      in: query
+      schema:
+        type: integer
+        default: 20
+        minimum: 1
+        maximum: 100
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid JWT.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: Authenticated but not permitted to access this resource.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Resource not found or not visible to this user.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    UnprocessableEntity:
+      description: Validation error.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+#backend paths here
+paths:
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Register a new user account
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: Account created. Returns JWT immediately.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '409':
+          description: Email already registered.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Authenticate and receive a JWT
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Authentication successful.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '401':
+          description: Invalid credentials.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Obtain a new access token using a refresh token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token:
+                  type: string
+      responses:
+        '200':
+          description: New token pair issued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '401':
+          description: Refresh token invalid or expired.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Get the authenticated user's profile
+      responses:
+        '200':
+          description: Current user profile.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/me/password:
+    put:
+      tags: [Auth]
+      summary: Change the authenticated user's password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password:
+                  type: string
+                  format: password
+                new_password:
+                  type: string
+                  format: password
+                  minLength: 8
+      responses:
+        '204':
+          description: Password changed.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  /entities/search:
+    get:
+      tags: [Entities]
+      summary: Search for entities with optional fuzzy matching
+      description: >
+        Searches the Neo4j database for FtM entities matching the given query.
+        Results are filtered by visibility: only entities that are public OR
+        owned by the authenticated user are returned. The `schema` parameter narrows results to a
+        specific FtM schema type. Any combination of parameters may be used;
+        at least one of `q` or `schema` is recommended.
+      parameters:
+        - name: q
+          in: query
+          description: >
+            Free-text query matched against entity properties (name, aliases,
+            identifiers, etc.). Fuzzy matching is applied when `fuzzy=true`.
+          schema:
+            type: string
+          example: "John Doe"
+        - name: schema
+          in: query
+          description: Filter by FtM schema type (e.g. Person, Organization, Ownership).
+          schema:
+            type: string
+          example: Person
+        - name: fuzzy
+          in: query
+          description: Enable fuzzy/approximate string matching (default true).
+          schema:
+            type: boolean
+            default: true
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+      responses:
+        '200':
+          description: Paginated list of matching entities.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EntitySearchResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /entities/{id}:
+    get:
+      tags: [Entities]
+      summary: Get a specific entity by ID
+      description: >
+        Returns the current live state of an entity from Neo4j. Use this
+        endpoint when reopening a project to check whether saved entities
+        have changed since the project snapshot was taken.
+        Returns 404 if the entity does not exist or is not visible to the user.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Entity found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FtMEntity'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /entities/{id}/relationships:
+    get:
+      tags: [Entities]
+      summary: Get all relationships connected to an entity
+      description: >
+        Returns FtM interstitial entities (Ownership, Membership, Directorship,
+        etc.) that reference this entity in any of their entity-typed properties.
+        This is the primary graph traversal endpoint; call it recursively from
+        the frontend to build the relationship graph. Results respect visibility
+        rules. The `depth` parameter performs server-side recursive expansion up
+        to the requested number of hops.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: depth
+          in: query
+          description: >
+            Number of relationship hops to expand recursively (1 = immediate
+            neighbours only). Values above 3 may be slow on large graphs.
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+            maximum: 5
+        - name: schema
+          in: query
+          description: Filter returned relationships by FtM schema type.
+          schema:
+            type: string
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+      responses:
+        '200':
+          description: >
+            Paginated list of interstitial FtM entities representing
+            relationships. Each entry's properties contain entity-type values
+            referencing connected node entities.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EntitySearchResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /entities/{id}/documents:
+    get:
+      tags: [Entities]
+      summary: Get documents that are the source of an entity
+      description: >
+        Returns all documents in which this entity appears via its provenance
+        entries. Only documents that are public or owned by the authenticated
+        user are returned.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+      responses:
+        '200':
+          description: Paginated list of source documents.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /relationships/{id}:
+    get:
+      tags: [Entities]
+      summary: Get a specific interstitial (relationship) entity by ID
+      description: >
+        Convenience endpoint equivalent to GET /entities/{id}, but semantically
+        signals that the caller expects an Interval-subtype entity. Returns the
+        same FtMEntity schema. Visibility rules apply.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Relationship entity found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FtMEntity'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /relationships/{id}/documents:
+    get:
+      tags: [Entities]
+      summary: Get documents that are the source of a relationship
+      description: >
+        Returns all documents in which this relationship entity appears via
+        its provenance. Visibility rules apply.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+      responses:
+        '200':
+          description: Paginated list of source documents.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /documents/upload/text:
+    post:
+      tags: [Documents]
+      summary: Upload a plain-text document for NER processing
+      description: >
+        Accepts a plain-text file. The backend creates a Document record,
+        enqueues a NER job, and returns the job handle. The caller can poll
+        /jobs/{job_id} for status. The `public` field on the document is
+        initialised from `make_public`.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Plain-text file (UTF-8).
+                make_public:
+                  type: boolean
+                  default: false
+                  description: >
+                    If true, the document is immediately marked public,
+                    causing all extracted entities and relationships to be
+                    publicly visible.
+      responses:
+        '202':
+          description: Job accepted. Poll /jobs/{job_id} for progress.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  /documents/upload/pdf:
+    post:
+      tags: [Documents]
+      summary: Upload a PDF document for OCR + NER processing
+      description: >
+        Accepts a PDF file. The backend forwards it to pdf_service for OCR,
+        then pipes the page text to ner_service for entity extraction.
+        Returns a job handle for polling.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: PDF file.
+                make_public:
+                  type: boolean
+                  default: false
+      responses:
+        '202':
+          description: Job accepted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '415':
+          description: Unsupported media type (only application/pdf accepted).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+/documents/mine:
+    get:
+      tags: [Documents]
+      summary: List documents owned by the authenticated user
+      description: >
+        Returns only documents where the authenticated user appears in
+        owner_ids.
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [queued, ocr_processing, ner_processing, completed, failed]
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [text, pdf]
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+      responses:
+        '200':
+          description: Paginated list of the user's own documents.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /documents/{id}:
+    get:
+      tags: [Documents]
+      summary: Get metadata for a specific document
+      description: Returns 404 if the document is not visible to the authenticated user.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Document metadata.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Document'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    patch:
+      tags: [Documents]
+      summary: Update document metadata
+      description: >
+        Allows an owner to update mutable fields. The most important use case
+        is releasing a document publicly (`public: true`). Any owner may set
+        `public` to true; the change propagates to all entities and
+        relationships whose sole source is this document. Only owners may
+        call this endpoint.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                public:
+                  type: boolean
+                  description: Set to true to release this document publicly.
+      responses:
+        '200':
+          description: Updated document metadata.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Document'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Documents]
+      summary: Remove the authenticated user's ownership of a document
+      description: >
+        Removes the calling user from `owner_ids`. If no owners remain, the
+        document and all orphaned entities are permanently deleted. If other
+        owners remain, those owners and the document persist.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Ownership removed (or document deleted if last owner).
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /documents/{id}/entities:
+    get:
+      tags: [Documents]
+      summary: Get all entities extracted from a document
+      description: >
+        Returns all FtM entities (node-type and interstitial) whose provenance
+        includes this document. Visibility of the document itself must be
+        satisfied first; individual entities further respect their own `public`
+        flags.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: schema
+          in: query
+          description: Filter by FtM schema type.
+          schema:
+            type: string
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+      responses:
+        '200':
+          description: Paginated list of extracted entities.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EntitySearchResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /jobs/{id}:
+    get:
+      tags: [Jobs]
+      summary: Poll the processing status of a document upload job
+      description: >
+        Returns the current status of an async NER or OCR+NER processing job.
+        Only the job owner may poll their own jobs.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Current job status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /jobs:
+    get:
+      tags: [Jobs]
+      summary: List all processing jobs for the authenticated user
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [queued, ocr_processing, ner_processing, completed, failed]
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+      responses:
+        '200':
+          description: Paginated job list.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total:
+                    type: integer
+                  results:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/JobStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /projects:
+    get:
+      tags: [Projects]
+      summary: List all projects belonging to the authenticated user
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+      responses:
+        '200':
+          description: Paginated project list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    post:
+      tags: [Projects]
+      summary: Create and save a new project snapshot
+      description: >
+        Saves the complete current graph state (entities, relationships, and
+        viewport) as a new project in MongoDB. The snapshot is stored in full
+        so the user sees the exact same view on reload.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, snapshot]
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+                  nullable: true
+                snapshot:
+                  $ref: '#/components/schemas/ProjectSnapshot'
+      responses:
+        '201':
+          description: Project created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  /projects/{id}:
+    get:
+      tags: [Projects]
+      summary: Load a saved project by ID
+      description: >
+        Returns the full project including the snapshot. The frontend should
+        render the snapshot immediately, then optionally call GET /entities/{id}
+        for each entity to detect changes since the snapshot was taken.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Project loaded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      tags: [Projects]
+      summary: Overwrite an existing project snapshot
+      description: >
+        Replaces the stored snapshot entirely with a new one. Used when the
+        user saves changes to an existing project. The previous snapshot is
+        not retained (no versioning).
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+                  nullable: true
+                snapshot:
+                  $ref: '#/components/schemas/ProjectSnapshot'
+      responses:
+        '200':
+          description: Project updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Projects]
+      summary: Delete a project
+      description: Permanently removes the project from MongoDB. Only the owner may delete.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Project deleted.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+
+# These are called exclusively by the Spring Boot backend.
+# No JWT authentication is used; network-level isolation (Kubernetes NetworkPolicy)
+# provides security. The `security: []` override makes this explicit.
+
+  /pdf:
+    post:
+      tags: [PDF_Service]
+      summary: Extract text from a PDF (pdf_service)
+      description: >
+        Called by the backend after receiving a PDF upload. Returns per-page
+        extracted text which is then forwarded to the ner_service. This endpoint
+        lives on the pdf_service server (http://pdf-service.app.svc.cluster.local).
+      security: []
+      servers:
+        - url: http://pdf-service.app.svc.cluster.local
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OcrRequest'
+      responses:
+        '200':
+          description: OCR complete. Returns per-page text.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OcrResponse'
+        '422':
+          description: File could not be processed (corrupt, encrypted, etc.).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /ner:
+    post:
+      tags: [NER_Service]
+      summary: Extract FtM entities from page text (ner_service)
+      description: >
+        Called by the backend with page text (from either direct text upload or
+        OCR output). Returns a flat list of FtM entities, including both node-
+        and edge-type entities, each with a confidence score and provenance.
+        Entity deduplication is handled internally by this service before
+        returning. This endpoint lives on the ner_service server
+        (http://ner-service.app.svc.cluster.local).
+      security: []
+      servers:
+        - url: http://ner-service.app.svc.cluster.local
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NerRequest'
+      responses:
+        '200':
+          description: >
+            NER complete. Returns all extracted FtM entities. The backend
+            is responsible for writing these to Neo4j and updating
+            provenance, ownership, and public flags.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NerResponse'
+        '422':
+          description: Input text could not be processed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
