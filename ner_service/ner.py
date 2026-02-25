@@ -311,7 +311,10 @@ def _call_llm(text: str) -> dict:
                 # Disable context carry-over — each document is independent.
                 # Ollama uses context=[] to start fresh each call.
                 context=[],
-                options={"temperature": 0.1},  # low temperature for structured output
+                options={
+                    "temperature": 0.1,
+                    "num_gpu": 999, 
+                    },  # low temperature for structured output
             )
             raw = response["response"].strip()
 
