@@ -28,6 +28,8 @@ spec:
               value: "changeme"
             - name: MONGO_URI
               value: "mongodb://mongodb.app.svc.cluster.local:27017/dev"
+            - name: JWT_SECRET
+              value: "dev-secret"
           resources:
             requests:
               cpu: "100m"

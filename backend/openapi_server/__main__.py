@@ -12,6 +12,7 @@ def main():
     flask_app.config["NEO4J_URI"] = os.getenv("NEO4J_URI")
     flask_app.config["NEO4J_USER"] = os.getenv("NEO4J_USER")
     flask_app.config["NEO4J_PASSWORD"] = os.getenv("NEO4J_PASSWORD")
+    flask_app.config["JWT_SECRET"] = os.getenv("JWT_SECRET")
     
     init_db(flask_app)
     
