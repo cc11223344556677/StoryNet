@@ -1,0 +1,5 @@
+flask>=3.0,<4.0
+gunicorn>=21.2,<23.0
+ollama>=0.2,<1.0
+followthemoney>=3.6,<4.0
+pyicu>=2.12

@@ -591,6 +591,84 @@ paths:
         '422':
           $ref: '#/components/responses/UnprocessableEntity'
 
+  /entities:
+    post:
+      tags: [Entities]
+      summary: Ingest NER-extracted entities into the graph database
+      description: >
+        Accepts the body returned by the ner_service POST /ner endpoint and
+        persists all FtMEntity objects (both node-type and interstitial
+        edge-type) into Neo4j.  The backend sets `owner_ids` and `public`
+        before writing; the values supplied in the request body for those
+        fields are ignored.
+
+        If an entity with the same `id` already exists in Neo4j, its
+        properties are merged (union of property values) and its provenance
+        list is extended.  Confidence is updated to the maximum of the
+        existing and incoming values.
+
+        Only the document owner (i.e., a user whose ID is in the document's
+        `owner_ids`) may call this endpoint.  The `document_id` in each
+        provenance entry is validated against the caller's owned documents.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [document_id, job_id, entities]
+              properties:
+                document_id:
+                  type: string
+                  description: >
+                    The document these entities were extracted from.
+                    Used to resolve ownership and public flags.
+                job_id:
+                  type: string
+                  description: >
+                    The job that resulted in these entities, used
+                    to mark completion of job.
+                entities:
+                  type: array
+                  description: >
+                    FtMEntity objects as returned by the ner_service.
+                    Both node-type and interstitial edge-type entities are
+                    accepted in the same list.
+                  items:
+                    $ref: '#/components/schemas/FtMEntity'
+      responses:
+        '201':
+          description: >
+            Entities written to Neo4j.  Returns a summary of what was
+            created or merged.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  document_id:
+                    type: string
+                  created:
+                    type: integer
+                    description: Number of new entities created.
+                  merged:
+                    type: integer
+                    description: Number of existing entities updated/merged.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: >
+            The referenced document_id does not exist or is not owned by
+            the authenticated user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
   /entities/search:
     get:
       tags: [Entities]
