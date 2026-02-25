@@ -5,8 +5,8 @@ info:
   title: StoryNet API
   version: 2.0.0
 servers:
-- description: backend API
-  url: https://angles-server.ddns.net:5001/api
+#- description: backend API
+#  url: https://angles-server.ddns.net:5001/api
 - description: Internal pdf_service (OCR) — not publicly reachable
   url: http://pdf-service.app.svc.cluster.local:5001
 - description: Internal ner_service (NER/LLM) — not publicly reachable
@@ -929,7 +929,7 @@ paths:
       x-openapi-router-controller: openapi_server.controllers.projects_controller
     post:
       description: |
-        Saves the complete current graph state (entities, relationships, and viewport) as a new project in MongoDB. The snapshot is stored in full so the user sees the exact same view on reload.
+        Saves the complete current graph state (entities, relationships) as a new project in MongoDB. The snapshot is stored in full so the user sees the exact same view on reload.
       operationId: projects_post
       requestBody:
         content:
@@ -1522,8 +1522,6 @@ components:
             - owner_ids
             - owner_ids
             last_changed: 2000-01-23T04:56:07.000+00:00
-          viewport:
-            key: ""
       properties:
         id:
           title: id
@@ -1608,8 +1606,6 @@ components:
           - owner_ids
           - owner_ids
           last_changed: 2000-01-23T04:56:07.000+00:00
-        viewport:
-          key: ""
       properties:
         entities:
           description: All FtM entities (nodes and interstitial edges) in the graph.
@@ -1617,15 +1613,8 @@ components:
             $ref: "#/components/schemas/FtMEntity"
           title: entities
           type: array
-        viewport:
-          additionalProperties: true
-          description: |
-            Frontend layout state (zoom level, pan position, node positions). Treated as opaque by the backend.
-          title: viewport
-          type: object
       required:
       - entities
-      - viewport
       title: ProjectSnapshot
       type: object
     LoginRequest:
@@ -1894,8 +1883,6 @@ components:
               - owner_ids
               - owner_ids
               last_changed: 2000-01-23T04:56:07.000+00:00
-            viewport:
-              key: ""
         - updated_at: 2000-01-23T04:56:07.000+00:00
           owner_id: owner_id
           name: name
@@ -1950,8 +1937,6 @@ components:
               - owner_ids
               - owner_ids
               last_changed: 2000-01-23T04:56:07.000+00:00
-            viewport:
-              key: ""
       properties:
         total:
           title: total

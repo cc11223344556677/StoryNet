@@ -14,26 +14,21 @@ class ProjectSnapshot(Model):
     Do not edit the class manually.
     """
 
-    def __init__(self, entities=None, viewport=None):  # noqa: E501
+    def __init__(self, entities=None):  # noqa: E501
         """ProjectSnapshot - a model defined in OpenAPI
 
         :param entities: The entities of this ProjectSnapshot.  # noqa: E501
         :type entities: List[FtMEntity]
-        :param viewport: The viewport of this ProjectSnapshot.  # noqa: E501
-        :type viewport: Dict[str, object]
         """
         self.openapi_types = {
             'entities': List[FtMEntity],
-            'viewport': Dict[str, object]
         }
 
         self.attribute_map = {
             'entities': 'entities',
-            'viewport': 'viewport'
         }
 
         self._entities = entities
-        self._viewport = viewport
 
     @classmethod
     def from_dict(cls, dikt) -> 'ProjectSnapshot':
@@ -70,28 +65,3 @@ class ProjectSnapshot(Model):
             raise ValueError("Invalid value for `entities`, must not be `None`")  # noqa: E501
 
         self._entities = entities
-
-    @property
-    def viewport(self) -> Dict[str, object]:
-        """Gets the viewport of this ProjectSnapshot.
-
-        Frontend layout state (zoom level, pan position, node positions). Treated as opaque by the backend.   # noqa: E501
-
-        :return: The viewport of this ProjectSnapshot.
-        :rtype: Dict[str, object]
-        """
-        return self._viewport
-
-    @viewport.setter
-    def viewport(self, viewport: Dict[str, object]):
-        """Sets the viewport of this ProjectSnapshot.
-
-        Frontend layout state (zoom level, pan position, node positions). Treated as opaque by the backend.   # noqa: E501
-
-        :param viewport: The viewport of this ProjectSnapshot.
-        :type viewport: Dict[str, object]
-        """
-        if viewport is None:
-            raise ValueError("Invalid value for `viewport`, must not be `None`")  # noqa: E501
-
-        self._viewport = viewport

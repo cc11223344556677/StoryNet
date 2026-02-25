@@ -8,6 +8,7 @@ import bcrypt
 from datetime import datetime, timedelta, timezone
 from bson import ObjectId
 from openapi_server.db import get_mongo
+from flask import request
 
 from openapi_server.models.auth_me_password_put_request import AuthMePasswordPutRequest  # noqa: E501
 from openapi_server.models.auth_refresh_post_request import AuthRefreshPostRequest  # noqa: E501
@@ -21,7 +22,7 @@ from openapi_server import util
 #helpers:
 def _jwt_secret():
     from flask import current_app
-    return current_app.config.get("JWT_SECRET", os.environ.get("JWT_SECRET", "dev-secret"))
+    return current_app.config.get("JWT_SECRET", os.environ.get("JWT_SECRET", "changeme"))
 
 
 def _make_tokens(user_id: str, email: str):
@@ -102,6 +103,8 @@ def auth_me_get():  # noqa: E501
 
     :rtype: Union[UserProfile, Tuple[UserProfile, int], Tuple[UserProfile, int, Dict[str, str]]
     """
+    print("AUTH HEADER:", request.headers.get("Authorization"))
+    print("TOKEN INFO:", connexion.context.get("token_info"))
     uid = _current_uid()
     if not uid:
         return ErrorResponse(error="UNAUTHORIZED", message="Not authenticated."), 401
@@ -133,6 +136,7 @@ def auth_me_password_put(body):  # noqa: E501
 
     :rtype: Union[None, Tuple[None, int], Tuple[None, int, Dict[str, str]]
     """
+    print("AUTH HEADER:", request.headers.get("Authorization"))
     uid = _current_uid()
     if not uid:
         return ErrorResponse(error="UNAUTHORIZED", message="Not authenticated."), 401
@@ -176,6 +180,7 @@ def auth_refresh_post(body):  # noqa: E501
 
     :rtype: Union[TokenResponse, Tuple[TokenResponse, int], Tuple[TokenResponse, int, Dict[str, str]]
     """
+    print("AUTH HEADER:", request.headers.get("Authorization"))
     if connexion.request.is_json:
         data = connexion.request.get_json()
     else:

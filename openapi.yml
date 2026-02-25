@@ -25,8 +25,8 @@ tags:
     description: Internal NER endpoint (ner_service container)
 
 servers:
-  - url: https://angles-server.ddns.net:5001/api #TODO: change this later
-    description: backend API
+  #- url: https://angles-server.ddns.net:5001/api #TODO: change this later
+  #  description: backend API
   - url: http://pdf-service.app.svc.cluster.local:5001
     description: Internal pdf_service (OCR) — not publicly reachable
   - url: http://ner-service.app.svc.cluster.local:5000
@@ -230,19 +230,13 @@ components:
         Complete graph state saved at project-save time. Entities include both
         node-type and edge-type FtM entities. The frontend renders this without
         hitting the live graph database, preserving the exact saved view.
-      required: [entities, viewport]
+      required: [entities]
       properties:
         entities:
           type: array
           description: All FtM entities (nodes and interstitial edges) in the graph.
           items:
             $ref: '#/components/schemas/FtMEntity'
-        viewport:
-          type: object
-          description: >
-            Frontend layout state (zoom level, pan position, node positions).
-            Treated as opaque by the backend.
-          additionalProperties: true
 
     LoginRequest:
       type: object
@@ -1106,8 +1100,7 @@ paths:
       tags: [Projects]
       summary: Create and save a new project snapshot
       description: >
-        Saves the complete current graph state (entities, relationships, and
-        viewport) as a new project in MongoDB. The snapshot is stored in full
+        Saves the complete current graph state (entities, relationships) as a new project in MongoDB. The snapshot is stored in full
         so the user sees the exact same view on reload.
       requestBody:
         required: true
