@@ -3,6 +3,8 @@ kind: Deployment
 metadata:
   name: backend
   namespace: app
+  annotations:
+    config.kubernetes.io/depends-on: my-db
 spec:
   replicas: 1
   selector:

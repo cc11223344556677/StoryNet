@@ -3,6 +3,8 @@ kind: Deployment
 metadata:
   name: ner-service
   namespace: app
+  labels:
+    app: ner-service
 spec:
   replicas: 1
   selector:
@@ -15,17 +17,37 @@ spec:
     spec:
       containers:
         - name: ner-service
-          image: ner_service:latest
+          image: ner-service:latest
           imagePullPolicy: Never
           ports:
             - containerPort: 5000
           resources:
             requests:
-              cpu: "100m"
-              memory: "128Mi"
+              memory: "8Gi"
+              cpu: "2"
             limits:
-              cpu: "1000m"
-              memory: "1024Mi"
+              memory: "16Gi"
+              cpu: "4"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 5000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 5000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+          env:
+            # Override the model at deploy time without rebuilding the image.
+            # The model must still be baked into the image via the Dockerfile ARG.
+            - name: MODEL_NAME
+              value: "qwen2.5:7b-instruct-q4_K_M"
+
 ---
 apiVersion: v1
 kind: Service
@@ -36,5 +58,28 @@ spec:
   selector:
     app: ner-service
   ports:
-    - port: 5000
+    - protocol: TCP
+      port: 5000
       targetPort: 5000
+  type: ClusterIP
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ner-service-ingress
+  namespace: app
+spec:
+  podSelector:
+    matchLabels:
+      app: ner-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: backend   
+      ports:
+        - protocol: TCP
+          port: 5000
