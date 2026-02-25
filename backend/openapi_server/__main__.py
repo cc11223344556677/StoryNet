@@ -2,11 +2,14 @@ import connexion
 import os
 from openapi_server.db import init_db
 from openapi_server import encoder
+import logging
 
 
 def main():
     app = connexion.App(__name__, specification_dir='./openapi/')
     flask_app = app.app
+    
+    flask_app.logger.setLevel(logging.INFO)
     
     flask_app.config["MONGO_URI"] = os.getenv("MONGO_URI")
     flask_app.config["NEO4J_URI"] = os.getenv("NEO4J_URI")

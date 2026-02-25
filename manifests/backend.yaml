@@ -20,6 +20,8 @@ spec:
           ports:
             - containerPort: 8080
           env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
             - name: NEO4J_URI
               value: "bolt://neo4j.app.svc.cluster.local:7687"
             - name: NEO4J_USER

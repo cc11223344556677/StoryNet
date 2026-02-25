@@ -15,7 +15,6 @@ def info_from_bearerAuth(token):
     :return: Decoded token information or None if token is invalid
     :rtype: dict | None
     """
-    print("AUTH HEADER:", request.headers.get("Authorization"))
     try:
         secret = current_app.config.get("JWT_SECRET_KEY", "changeme")
         payload = jwt.decode(token, secret, algorithms=["HS256"])

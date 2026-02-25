@@ -103,8 +103,6 @@ def auth_me_get():  # noqa: E501
 
     :rtype: Union[UserProfile, Tuple[UserProfile, int], Tuple[UserProfile, int, Dict[str, str]]
     """
-    print("AUTH HEADER:", request.headers.get("Authorization"))
-    print("TOKEN INFO:", connexion.context.get("token_info"))
     uid = _current_uid()
     if not uid:
         return ErrorResponse(error="UNAUTHORIZED", message="Not authenticated."), 401
