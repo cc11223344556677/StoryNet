@@ -18,7 +18,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1: pull model weights
 # ---------------------------------------------------------------------------
-FROM nvidia/cuda:12.4.1-base-ubuntu24.04 AS model-pull
+FROM ubuntu:24.04 AS model-pull
 
 ARG MODEL_NAME="qwen2.5:7b-instruct-q4_K_M"
 
@@ -38,7 +38,7 @@ RUN ollama serve & \
 # ---------------------------------------------------------------------------
 # Stage 2: application image
 # ---------------------------------------------------------------------------
-FROM nvidia/cuda:12.4.1-base-ubuntu24.04
+FROM ubuntu:24.04
 
 ARG MODEL_NAME="qwen2.5:7b-instruct-q4_K_M"
 ENV MODEL_NAME=${MODEL_NAME}

@@ -139,27 +139,29 @@ def proxy_to_neo4j_params(
     owner_ids: list[str],
     public: bool,
 ) -> dict:
-    """
-    Serialise an EntityProxy into a flat dict suitable for Neo4j MERGE parameters.
-
-    Neo4j cannot store nested maps natively, so `properties` and `provenance`
-    are JSON-encoded strings. `entity_refs` is stored as a flat string list for
-    efficient Cypher list operations.
-    """
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    ftm_dict = proxy.to_dict()  # canonical FtM serialisation
+    ftm_dict = proxy.to_dict()
+
+    # Collect name-like values for full-text search indexing
+    name_props = ("name", "alias", "weakAlias", "firstName", "lastName", "middleName")
+    name_values = []
+    for prop_name in name_props:
+        try:
+            name_values.extend(proxy.get(prop_name))
+        except Exception:
+            pass
 
     return {
         "id": proxy.id,
         "schema": proxy.schema.name,
         "caption": proxy.caption,
-        # Store the validated+normalised FtM properties as a JSON string
         "properties_json": json.dumps(ftm_dict.get("properties", {})),
         "confidence": confidence,
         "public": public,
         "owner_ids": owner_ids,
         "provenance_json": json.dumps(provenance),
         "entity_refs": get_entity_refs(proxy),
+        "name_search": " ".join(name_values).lower(),
         "now": now,
     }
 
@@ -183,7 +185,6 @@ def neo4j_record_to_proxy(record_data: dict) -> Optional[EntityProxy]:
         print("Failed to reconstruct proxy from Neo4j: %s", exc)
         return None
 
-
 def proxy_to_api_model(
     proxy: EntityProxy,
     record_data: dict,
@@ -191,23 +192,31 @@ def proxy_to_api_model(
     """
     Convert an EntityProxy + Neo4j metadata dict into an FtMEntity API model.
 
-    The FtM proxy provides the validated schema/properties/caption;
-    record_data provides the StoryNet metadata (confidence, provenance, etc.).
+    We build a plain dict matching the OpenAPI field names and pass it to
+    FtMEntity.from_dict(), which is the openapi-generator's own deserialisation
+    path. This avoids directly calling __init__ with keyword arguments, which
+    breaks because the generator renames the 'schema' property internally to
+    avoid conflicting with the base model class's own 'schema' attribute.
+    from_dict() uses the generated attribute_map to handle that rename.
     """
-    provenance = json.loads(record_data.get("provenance_json", "[]"))
-    return FtMEntity(
-        id=proxy.id,
-        schema=proxy.schema.name,
-        caption=proxy.caption,
-        properties=proxy.to_dict().get("properties", {}),
-        confidence=record_data.get("confidence"),
-        public=record_data.get("public", False),
-        owner_ids=record_data.get("owner_ids", []),
-        provenance=provenance,
-        first_seen=record_data.get("first_seen"),
-        last_changed=record_data.get("last_changed"),
-    )
+    try:
+        provenance = json.loads(record_data.get("provenance_json", "[]"))
+    except (json.JSONDecodeError, TypeError):
+        provenance = []
 
+    d = {
+        "id": proxy.id,
+        "schema": proxy.schema.name,
+        "caption": proxy.caption,
+        "properties": proxy.to_dict().get("properties", {}),
+        "confidence": record_data.get("confidence"),
+        "public": record_data.get("public", False),
+        "owner_ids": record_data.get("owner_ids", []),
+        "provenance": provenance,
+        "first_seen": record_data.get("first_seen"),
+        "last_changed": record_data.get("last_changed"),
+    }
+    return FtMEntity.from_dict(d)
 
 def neo4j_record_to_api_model(record_data: dict) -> Optional[FtMEntity]:
     """

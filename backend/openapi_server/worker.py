@@ -5,6 +5,9 @@ import os
 import requests
 import logging
 from openapi_server.db import get_mongo, get_neo4j
+from openapi_server.controllers.ftm_utils import proxy_to_neo4j_params, get_schema
+from followthemoney import model as ftm_model
+from followthemoney.exc import InvalidData
 
 PDF_SERVICE_URL = os.environ.get("PDF_SERVICE_URL", "http://pdf-service.app.svc.cluster.local:5001")
 NER_SERVICE_URL = os.environ.get("NER_SERVICE_URL", "http://ner-service.app.svc.cluster.local:5000")
@@ -29,9 +32,6 @@ def _upsert_entity(session, entity: dict, document_id: str, owner_ids: list, pub
     do natively). Instead we read existing provenance, merge in Python, and
     write back.
     """
-    from openapi_server.controllers.ftm_utils import proxy_to_neo4j_params, get_schema
-    from followthemoney import model as ftm_model
-    from followthemoney.exc import InvalidData
 
     schema_name = entity.get("schema", "")
     ftm_schema = ftm_model.get(schema_name)
@@ -227,7 +227,7 @@ def _process_job(mongo, neo4j_driver, job: dict):
 
     except Exception as exc:
         msg = str(exc)
-        print(f"Job {job_id} failed: {msg}", exc_info=True)
+        print(f"Job {job_id} failed: {msg}")
         _update_job(mongo, job_id, status="failed", message=msg)
         _update_document(mongo, doc_id, status="failed", error_message=msg)
 

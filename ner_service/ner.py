@@ -43,10 +43,6 @@ _ENTITY_LIST = ", ".join(FTM_ENTITY_TYPES)
 _CONN_LIST   = ", ".join(FTM_CONNECTION_TYPES)
 
 # Per-schema property reference injected into the prompt.
-# Only the properties most likely to appear in investigative documents are
-# listed here; the full FtM schema has many more.  Property names use the
-# short form (no "Schema:" prefix) as that is what entity.add() accepts.
-# All values must be arrays of strings in the final JSON.
 _SCHEMA_PROPERTIES = """\
 PROPERTY REFERENCE — use ONLY property names listed under the entity's type.
 All property values must be arrays of strings (even single values).
@@ -79,7 +75,7 @@ Airplane / Vehicle
   buildDate, summary
 
 BankAccount
-  name, iban, accountNumber, bankName, country, currency, summary
+  iban, accountNumber, bankName, country, currency, summary
 
 Passport / Identification
   number, country, authority, type, startDate, endDate, summary
@@ -119,7 +115,7 @@ ENTITIES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Each entity object must have:
   "type"        — one of: {_ENTITY_LIST}
-  "name"        — canonical name as it appears in the text (string)
+  "name"        — canonical name/identifier as it appears in the text (string)
   "confidence"  — float 0.0–1.0: certainty that this is a real entity of \
 that type
   "properties"  — object whose keys are FtM property names and whose values \
@@ -161,7 +157,6 @@ RELATIONSHIP_PROPS: dict[str, tuple[str, str]] = {
     "Employment":        ("employee",    "employer"),
     "Family":            ("person",      "relative"),
     "Membership":        ("member",      "organization"),
-    # the FtM schema property is 'post', not 'position'
     "Occupancy":         ("holder",      "post"),
     "Ownership":         ("owner",       "asset"),
     "Payment":           ("payer",       "beneficiary"),
@@ -171,6 +166,49 @@ RELATIONSHIP_PROPS: dict[str, tuple[str, str]] = {
     "Succession":        ("predecessor", "successor"),
     "UnknownLink":       ("subject",     "object"),
 }
+
+# ---------------------------------------------------------------------------
+# Schema introspection helpers
+# ---------------------------------------------------------------------------
+
+def _get_name_property(schema) -> Optional[str]:
+    """
+    Return the most appropriate 'name-like' property for a given FtM schema,
+    or None if no suitable property exists.
+
+    FtM schemas that don't have 'name' (e.g. Passport, BankAccount) use other
+    properties as their primary identifier. We try a ranked list of candidates
+    and return the first one the schema actually supports.
+    """
+    candidates = ["name", "number", "iban", "accountNumber", "full"]
+    for candidate in candidates:
+        try:
+            schema.get(candidate)  # raises if property doesn't exist
+            return candidate
+        except Exception:
+            continue
+    return None
+
+
+def _safe_add(entity, prop_name: str, value: str, schema_name: str) -> bool:
+    """
+    Attempt entity.add(prop_name, value), returning True on success.
+    Logs a debug message and returns False on any exception — never raises.
+    """
+    try:
+        entity.add(prop_name, str(value))
+        return True
+    except Exception as exc:
+        logger.debug(
+            "Skipping property '%s'='%s' on %s: %s",
+            prop_name, value, schema_name, exc,
+        )
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Entity / relationship construction
+# ---------------------------------------------------------------------------
 
 def _best_match(name: str, candidates: list[str]) -> Optional[str]:
     """Return the closest match from candidates, or None if nothing is close."""
@@ -185,43 +223,49 @@ def create_entity(entity_type: str, name: str, properties: Optional[dict] = None
     Falls back to LegalEntity if entity_type is unknown or not in the FtM model.
     entity.id is set via make_id() so it is a stable hash of (type, name).
 
-    If *properties* is provided (a dict of {prop_name: [str, ...]} as output
-    by the LLM), each key/value pair is fed through entity.add(), which
-    validates and normalises the values according to the FtM schema.  Invalid
-    property names or values are silently skipped with a warning — FtM raises
-    InvalidData for unknown props and simply ignores malformed values.
+    The canonical identifier (name, number, iban, etc.) is set from the
+    *name* argument using the property most appropriate for the schema — this
+    avoids InvalidData errors on schemas like Passport that have no 'name' prop.
+
+    If *properties* is provided, each key/value pair is fed through _safe_add(),
+    which silently skips invalid property names or values.
     """
     schema_name = _best_match(entity_type, FTM_ENTITY_TYPES) or "LegalEntity"
     try:
         schema = ftm_model.get(schema_name)
     except Exception:
-        logger.warning("Unknown entity schema '%s', falling back to LegalEntity.", entity_type)
+        logger.warning(
+            "Unknown entity schema '%s', falling back to LegalEntity.", entity_type
+        )
         schema = ftm_model.get("LegalEntity")
         schema_name = "LegalEntity"
 
     entity = ftm_model.make_entity(schema)
     entity.make_id(schema_name, name)
 
-    # Always set name from the canonical extracted name, not from properties,
-    # so the entity ID (which is derived from make_id above) is stable.
-    entity.add("name", name)
+    # Set the canonical identifier using the right property for this schema.
+    # _get_name_property introspects the schema so we never write to a
+    # property that doesn't exist (e.g. 'name' on Passport → use 'number').
+    name_prop = _get_name_property(schema)
+    if name_prop:
+        _safe_add(entity, name_prop, name, schema_name)
+    else:
+        logger.warning(
+            "Schema '%s' has no recognised name-like property; "
+            "entity '%s' will have no primary label.",
+            schema_name, name,
+        )
 
     if properties and isinstance(properties, dict):
         for prop_name, values in properties.items():
-            if prop_name == "name":
-                # Already set above; additional aliases go in via "alias" if needed.
+            if prop_name == name_prop:
+                # Already set above; skip to avoid duplicating the value.
+                # (Extra aliases from the LLM can come in via 'alias' if needed.)
                 continue
             if not isinstance(values, list):
-                # Normalise bare strings the LLM may accidentally produce.
                 values = [str(values)]
             for val in values:
-                try:
-                    entity.add(prop_name, str(val))
-                except Exception as exc:
-                    logger.debug(
-                        "Skipping property '%s'='%s' on %s: %s",
-                        prop_name, val, schema_name, exc,
-                    )
+                _safe_add(entity, prop_name, str(val), schema_name)
 
     return entity
 
@@ -236,18 +280,19 @@ def create_relationship(
     Instantiate a followthemoney EntityProxy for a relationship (Interval) entity.
 
     Looks up the canonical (source_prop, target_prop) pair for the connection
-    type and wires the two entity IDs in.  Falls back to UnknownLink if the
+    type and wires the two entity IDs in. Falls back to UnknownLink if the
     connection type is unrecognised.
 
-    If *properties* is provided, any extra relationship properties (startDate,
-    role, percentage, etc.) are applied via entity.add(), with invalid ones
-    silently skipped.
+    Extra relationship properties (startDate, role, percentage, etc.) are
+    applied via _safe_add(), with invalid ones silently skipped.
     """
     matched_type = _best_match(conn_type, list(RELATIONSHIP_PROPS.keys())) or "UnknownLink"
     try:
         schema = ftm_model.get(matched_type)
     except Exception:
-        logger.warning("Unknown relationship schema '%s', falling back to UnknownLink.", conn_type)
+        logger.warning(
+            "Unknown relationship schema '%s', falling back to UnknownLink.", conn_type
+        )
         schema = ftm_model.get("UnknownLink")
         matched_type = "UnknownLink"
 
@@ -256,17 +301,9 @@ def create_relationship(
     rel = ftm_model.make_entity(schema)
     rel.make_id(matched_type, source_entity.id, target_entity.id)
 
-    try:
-        rel.add(src_prop, source_entity.id)
-    except Exception as exc:
-        logger.warning("Could not set '%s' on %s: %s", src_prop, matched_type, exc)
+    _safe_add(rel, src_prop, source_entity.id, matched_type)
+    _safe_add(rel, tgt_prop, target_entity.id, matched_type)
 
-    try:
-        rel.add(tgt_prop, target_entity.id)
-    except Exception as exc:
-        logger.warning("Could not set '%s' on %s: %s", tgt_prop, matched_type, exc)
-
-    # Apply any extra relationship properties from the LLM (dates, role, etc.)
     if properties and isinstance(properties, dict):
         for prop_name, values in properties.items():
             if prop_name in (src_prop, tgt_prop):
@@ -274,22 +311,21 @@ def create_relationship(
             if not isinstance(values, list):
                 values = [str(values)]
             for val in values:
-                try:
-                    rel.add(prop_name, str(val))
-                except Exception as exc:
-                    logger.debug(
-                        "Skipping relationship property '%s'='%s' on %s: %s",
-                        prop_name, val, matched_type, exc,
-                    )
+                _safe_add(rel, prop_name, str(val), matched_type)
 
     return rel
+
+
+# ---------------------------------------------------------------------------
+# LLM interaction
+# ---------------------------------------------------------------------------
 
 def _call_llm(text: str) -> dict:
     """
     Call the LLM and return a parsed JSON dict.
 
     Retries up to MAX_RETRIES times if the output is not valid JSON or does
-    not contain the expected top-level keys.  Each retry appends an
+    not contain the expected top-level keys. Each retry appends an
     increasingly firm correction instruction to the prompt.
     """
     prompt = EXTRACTION_PROMPT + text
@@ -308,13 +344,11 @@ def _call_llm(text: str) -> dict:
             response = ollama.generate(
                 model=MODEL_NAME,
                 prompt=prompt + retry_suffix,
-                # Disable context carry-over — each document is independent.
-                # Ollama uses context=[] to start fresh each call.
                 context=[],
                 options={
                     "temperature": 0.1,
-                    "num_gpu": 999, 
-                    },  # low temperature for structured output
+                    "num_gpu": 999,
+                },
             )
             raw = response["response"].strip()
 
@@ -324,7 +358,6 @@ def _call_llm(text: str) -> dict:
 
             parsed = json.loads(raw)
 
-            # Validate top-level structure.
             if not isinstance(parsed, dict):
                 raise ValueError("LLM output is not a JSON object.")
             if "entities" not in parsed or "connections" not in parsed:
@@ -346,6 +379,11 @@ def _call_llm(text: str) -> dict:
         f"Last error: {last_error}"
     )
 
+
+# ---------------------------------------------------------------------------
+# Public extraction entry point
+# ---------------------------------------------------------------------------
+
 def extract_entities(
     text: str,
     document_id: str,
@@ -354,15 +392,18 @@ def extract_entities(
     """
     Run NER on *text* and return (entity_objects, relationship_objects).
 
-    Each returned object is a followthemoney EntityProxy.  Callers are
-    responsible for serialising via entity.to_dict() and for attaching
-    provenance / confidence metadata on top.
+    Each returned object is a (followthemoney EntityProxy, float confidence)
+    tuple. Callers are responsible for serialising via entity.to_dict() and
+    for attaching provenance / confidence metadata on top.
+
+    Individual entity or relationship construction failures are logged and
+    skipped rather than propagated, so a single malformed LLM output item
+    never aborts the whole extraction.
 
     Parameters
     ----------
     text:        Plain text to analyse.
-    document_id: Used only for logging context; provenance is attached by
-                 the Flask layer which has the full page list available.
+    document_id: Used only for logging context.
     page_number: Used only for logging context.
     """
     logger.info(
@@ -372,7 +413,7 @@ def extract_entities(
 
     llm_output = _call_llm(text)
 
-    raw_entities   = llm_output.get("entities", [])
+    raw_entities    = llm_output.get("entities", [])
     raw_connections = llm_output.get("connections", [])
 
     # --- Build entity proxy objects ---
@@ -382,15 +423,26 @@ def extract_entities(
         etype      = str(item.get("type", "LegalEntity")).strip()
         confidence = float(item.get("confidence", 0.5))
         props      = item.get("properties", {})
+
         if not name:
+            logger.debug("Skipping entity with empty name (type=%s)", etype)
             continue
-        proxy = create_entity(etype, name, properties=props)
+
+        try:
+            proxy = create_entity(etype, name, properties=props)
+        except Exception as exc:
+            logger.warning(
+                "Failed to create entity name='%s' type='%s': %s — skipping.",
+                name, etype, exc,
+            )
+            continue
+
         # Keep highest-confidence version if the same name appears twice.
         if name not in entity_map or confidence > entity_map[name][1]:
             entity_map[name] = (proxy, confidence)
 
     # --- Build relationship proxy objects ---
-    rel_list: list[tuple] = []  # (proxy, confidence)
+    rel_list: list[tuple] = []  # [(proxy, confidence), ...]
     for item in raw_connections:
         src_name   = str(item.get("source", "")).strip()
         tgt_name   = str(item.get("target", "")).strip()
@@ -407,8 +459,17 @@ def extract_entities(
 
         src_proxy, _ = entity_map[src_name]
         tgt_proxy, _ = entity_map[tgt_name]
-        rel_proxy = create_relationship(ctype, src_proxy, tgt_proxy, properties=props)
+
+        try:
+            rel_proxy = create_relationship(ctype, src_proxy, tgt_proxy, properties=props)
+        except Exception as exc:
+            logger.warning(
+                "Failed to create relationship '%s' → '%s' (%s): %s — skipping.",
+                src_name, tgt_name, ctype, exc,
+            )
+            continue
+
         rel_list.append((rel_proxy, confidence))
 
-    entity_results = list(entity_map.values())    # list of (proxy, confidence)
+    entity_results = list(entity_map.values())
     return entity_results, rel_list

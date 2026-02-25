@@ -35,7 +35,7 @@ def _records_to_entities(records) -> list:
         props = r["props"]
         entity = neo4j_record_to_api_model(props)
         if entity is None:
-            print("Skipping Neo4j record with id=%s – FtM reconstruction failed",
+            print("Skipping Neo4j record with id=%s - FtM reconstruction failed",
                         props.get("id", "?"))
             continue
         entities.append(entity)

@@ -1,4 +1,4 @@
-minikube start --cpus=8 --memory=24g --gpus=all
+#minikube start --cpus=8 --memory=24g --gpus=all
 
 eval $(minikube docker-env)
 
