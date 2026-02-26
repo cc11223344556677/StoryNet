@@ -114,7 +114,7 @@ def documents_id_delete(id_):  # noqa: E501
             session.run(
                 """
                 MATCH (e:Entity)
-                WHERE any(p IN e.provenance WHERE p.document_id = $doc_id)
+                "WHERE e.provenance_json CONTAINS $doc_id "
                 SET e.owner_ids = [x IN e.owner_ids WHERE x <> $user_id]
                 """,
                 doc_id=id_, user_id=user_id,
@@ -131,7 +131,7 @@ def documents_id_delete(id_):  # noqa: E501
             session.run(
                 """
                 MATCH (e:Entity)
-                WHERE all(p IN e.provenance WHERE p.document_id = $doc_id)
+                "WHERE e.provenance_json CONTAINS $doc_id "
                 DETACH DELETE e
                 """,
                 doc_id=id_,
@@ -140,8 +140,8 @@ def documents_id_delete(id_):  # noqa: E501
             session.run(
                 """
                 MATCH (e:Entity)
-                WHERE any(p IN e.provenance WHERE p.document_id = $doc_id)
-                SET e.provenance  = [p IN e.provenance WHERE p.document_id <> $doc_id],
+                "WHERE e.provenance_json CONTAINS $doc_id "
+                SET e.provenance_json  = [p IN e.provenance_json WHERE p.document_id <> $doc_id],
                     e.owner_ids   = [x IN e.owner_ids WHERE x <> $user_id]
                 """,
                 doc_id=id_,
@@ -197,7 +197,7 @@ def documents_id_entities_get(id_, _schema=None, page=None, page_size=None):  # 
     with driver.session() as session:
         count_result = session.run(
             f"MATCH (e:Entity) "
-            f"WHERE any(p IN e.provenance WHERE p.document_id = $doc_id) "
+            f"WHERE e.provenance_json CONTAINS $doc_id "
             f"AND (e.public = true OR $user_id IN e.owner_ids) "
             f"{schema_filter}"
             f"RETURN count(e) AS total",
@@ -207,7 +207,7 @@ def documents_id_entities_get(id_, _schema=None, page=None, page_size=None):  # 
 
         records = session.run(
             f"MATCH (e:Entity) "
-            f"WHERE any(p IN e.provenance WHERE p.document_id = $doc_id) "
+            f"WHERE e.provenance_json CONTAINS $doc_id "
             f"AND (e.public = true OR $user_id IN e.owner_ids) "
             f"{schema_filter}"
             f"RETURN properties(e) AS props "
@@ -293,8 +293,7 @@ def documents_id_patch(id_, body):  # noqa: E501 body not used, remove?
             session.run(
                 """
                 MATCH (e:Entity)
-                WHERE any(p IN e.provenance_json WHERE p.document_id = $doc_id)
-                  AND all(p IN e.provenance_json WHERE p.document_id = $doc_id)
+                "WHERE e.provenance_json CONTAINS $doc_id "
                 SET e.public = $public
                 """,
                 doc_id=id,
