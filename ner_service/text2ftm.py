@@ -145,16 +145,30 @@ def create_relationship(connection_type, source_entity, target_entity):
     """
     Create relationship entity using followthemoney schema.
     """
-    schema = model.get("UnknownLink") # default
-
     close_matches = difflib.get_close_matches(connection_type, FTM_CONNECTION_TYPES)
     if len(close_matches > 0):
         schema_name = model.get(close_matches[0]) # get most similar connection type
         schema = model.get(schema_name)
     else:
-        print(f"Warning: Unknown relationship type '{connection_type}'.")
+        schema_name = "UnknownLink"
+        schema = model.get("UnknownLink") # default
+        # print(f"Warning: Unknown relationship type '{connection_type}'.")
+        
 
     rel = model.make_entity(schema)
+
+    # "Associate",
+    # "Debt",
+    # "Directorship",
+    # "Employment",
+    # "Membership",
+    # "Occupancy",
+    # "Ownership",
+    # "Payment",
+    # "ProjectParticipant",
+    # "Representation",
+    # "Similar",
+    # "Succession",
 
     # Most relationship schemata use 'owner' / 'asset', 'person' / 'organization', etc.
     # Adjust according to your schema definitions.
@@ -169,6 +183,33 @@ def create_relationship(connection_type, source_entity, target_entity):
         rel.add("organization", target_entity.id)
     elif schema_name == "Membership":
         rel.add("member", source_entity.id)
+        rel.add("organization", target_entity.id)
+    elif schema_name == "Debt":
+        rel.add("debtor", source_entity.id)
+        rel.add("creditor", target_entity.id)
+    elif schema_name == "Employment":
+        rel.add("employer", source_entity.id)
+        rel.add("employee", target_entity.id)
+    elif schema_name == "Occupancy":
+        rel.add("holder", source_entity.id)
+        rel.add("post", source_entity.id)
+    elif schema_name == "Payment":
+        rel.add("payer", source_entity.id)
+        rel.add("beneficiary", target_entity.id)
+    elif schema_name == "ProjectParticipant":
+        rel.add("participant", source_entity.id)
+        rel.add("project", target_entity.id)
+    elif schema_name == "Representation":
+        rel.add("agent", source_entity.id)
+        rel.add("client", target_entity.id)
+    elif schema_name == "Similar":
+        rel.add("candidate", source_entity.id)
+        rel.add("match", target_entity.id)
+    elif schema_name == "Succession":
+        rel.add("predecessor", source_entity.id)
+        rel.add("successor", target_entity.id)
+    else: # UnknownLink
+        rel.add("subject", source_entity.id)
         rel.add("organization", target_entity.id)
     # TODO add support for other connection types
 
