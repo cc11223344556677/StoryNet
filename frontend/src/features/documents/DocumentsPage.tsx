@@ -8,6 +8,10 @@ import {
   CardContent,
   Chip,
   CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   FormControl,
   InputLabel,
   List,
@@ -28,21 +32,69 @@ import {
 } from "@mui/material";
 import type { SelectChangeEvent } from "@mui/material/Select";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
+import { useNavigate } from "react-router-dom";
 import type { DocumentStatus, DocumentType, JobStatus } from "../../types/domain";
 import { apiClient } from "../../api/factory";
 import { StoryNetApiError } from "../../api/errors";
 import { getEntityLabel, mapDocumentToVM } from "../../api/mappers";
 import { formatApiDate } from "../../lib/date";
+import {
+  addDocumentEntitiesToProject,
+  createProjectFromDocument,
+  ProjectSeedError
+} from "../projects/projectSeedService";
 
 const TERMINAL_JOB_STATES: ReadonlySet<DocumentStatus> = new Set(["completed", "failed"]);
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 const JOB_POLL_MAX_MS = 5 * 60 * 1000;
 const SET_PUBLIC_VERIFY_DELAY_MS = 600;
+const REMOVE_OWNERSHIP_VERIFY_DELAY_MS = 600;
+const ENTITY_PANEL_MIN_HEIGHT = 180;
+
+type EntityPanelState =
+  | "loading"
+  | "ready_with_rows"
+  | "ready_no_entities"
+  | "details_temporarily_unavailable";
+
+function formatProjectSeedError(error: unknown): string {
+  if (error instanceof ProjectSeedError) {
+    return error.message;
+  }
+
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return "Backend could not seed project entities from this document.";
+}
 
 function waitFor(ms: number): Promise<void> {
   return new Promise((resolve) => {
     window.setTimeout(resolve, ms);
   });
+}
+
+async function isOwnershipRemoved(documentId: string): Promise<boolean> {
+  let userId: string | null = null;
+
+  try {
+    userId = (await apiClient.me()).id;
+  } catch {
+    // If we cannot resolve identity, fallback to endpoint accessibility checks below.
+  }
+
+  try {
+    const document = await apiClient.getDocument(documentId);
+    if (!userId) {
+      return false;
+    }
+
+    return !document.owner_ids.includes(userId);
+  } catch {
+    // If the document is no longer visible, ownership has effectively been removed.
+    return true;
+  }
 }
 
 function formatBytes(bytes: number): string {
@@ -80,6 +132,7 @@ function validateFile(file: File): string | null {
 
 export function DocumentsPage(): JSX.Element {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
 
   const [statusFilter, setStatusFilter] = useState<DocumentStatus | "">("");
   const [typeFilter, setTypeFilter] = useState<DocumentType | "">("");
@@ -92,6 +145,12 @@ export function DocumentsPage(): JSX.Element {
   const [lastJob, setLastJob] = useState<JobStatus | null>(null);
   const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null);
   const [entitySchemaFilter, setEntitySchemaFilter] = useState("");
+  const [createSeedDialogOpen, setCreateSeedDialogOpen] = useState(false);
+  const [addSeedDialogOpen, setAddSeedDialogOpen] = useState(false);
+  const [seedDocumentId, setSeedDocumentId] = useState<string | null>(null);
+  const [newProjectName, setNewProjectName] = useState("");
+  const [newProjectDescription, setNewProjectDescription] = useState("");
+  const [targetProjectId, setTargetProjectId] = useState("");
 
   const documentsQuery = useQuery({
     queryKey: ["documents", statusFilter, typeFilter],
@@ -123,6 +182,12 @@ export function DocumentsPage(): JSX.Element {
         50
       ),
     enabled: Boolean(selectedDocumentId && canFetchDocumentEntities)
+  });
+
+  const projectOptionsQuery = useQuery({
+    queryKey: ["seed-project-options"],
+    queryFn: () => apiClient.listProjects(1, 100),
+    enabled: addSeedDialogOpen
   });
 
   const jobQuery = useQuery({
@@ -257,7 +322,22 @@ export function DocumentsPage(): JSX.Element {
 
   const removeDocumentMutation = useMutation({
     mutationFn: async (documentId: string) => {
-      await apiClient.deleteDocument(documentId);
+      try {
+        await apiClient.deleteDocument(documentId);
+      } catch (error) {
+        if (error instanceof StoryNetApiError && error.status === 500) {
+          if (await isOwnershipRemoved(documentId)) {
+            return;
+          }
+
+          await waitFor(REMOVE_OWNERSHIP_VERIFY_DELAY_MS);
+          if (await isOwnershipRemoved(documentId)) {
+            return;
+          }
+        }
+
+        throw error;
+      }
     },
     onSuccess: async (_, documentId) => {
       if (selectedDocumentId === documentId) {
@@ -265,6 +345,39 @@ export function DocumentsPage(): JSX.Element {
       }
 
       await queryClient.invalidateQueries({ queryKey: ["documents"] });
+    }
+  });
+
+  const createProjectSeedMutation = useMutation({
+    mutationFn: async (params: { documentId: string; name: string; description: string }) =>
+      createProjectFromDocument(apiClient, {
+        documentId: params.documentId,
+        name: params.name,
+        description: params.description
+      }),
+    onSuccess: async (project) => {
+      setCreateSeedDialogOpen(false);
+      setSeedDocumentId(null);
+      setNewProjectName("");
+      setNewProjectDescription("");
+      await queryClient.invalidateQueries({ queryKey: ["projects"] });
+      navigate(`/projects/${project.id}/graph`);
+    }
+  });
+
+  const addProjectSeedMutation = useMutation({
+    mutationFn: async (params: { documentId: string; projectId: string }) =>
+      addDocumentEntitiesToProject(apiClient, {
+        documentId: params.documentId,
+        projectId: params.projectId
+      }),
+    onSuccess: async (project) => {
+      setAddSeedDialogOpen(false);
+      setSeedDocumentId(null);
+      setTargetProjectId("");
+      await queryClient.invalidateQueries({ queryKey: ["projects"] });
+      await queryClient.invalidateQueries({ queryKey: ["project", project.id] });
+      navigate(`/projects/${project.id}/graph`);
     }
   });
 
@@ -291,6 +404,34 @@ export function DocumentsPage(): JSX.Element {
     return (documentsQuery.data?.results ?? []).map((document) => mapDocumentToVM(document));
   }, [documentsQuery.data]);
 
+  const selectedDocumentFromList = useMemo(() => {
+    if (!selectedDocumentId) {
+      return undefined;
+    }
+
+    return (documentsQuery.data?.results ?? []).find((document) => document.id === selectedDocumentId);
+  }, [documentsQuery.data, selectedDocumentId]);
+
+  const expectedEntityCount =
+    selectedDocumentQuery.data?.entity_count ?? selectedDocumentFromList?.entity_count ?? 0;
+
+  const isSchemaFiltered = entitySchemaFilter.trim().length > 0;
+  const entityResults = documentEntitiesQuery.data?.results ?? [];
+  const displayedEntityTotal = expectedEntityCount;
+  const hasEntityDetailsUnavailable =
+    canFetchDocumentEntities &&
+    !documentEntitiesQuery.isLoading &&
+    !isSchemaFiltered &&
+    expectedEntityCount > 0 &&
+    (documentEntitiesQuery.error instanceof Error || entityResults.length === 0);
+  const entityPanelState: EntityPanelState = documentEntitiesQuery.isLoading
+    ? "loading"
+    : hasEntityDetailsUnavailable
+      ? "details_temporarily_unavailable"
+      : entityResults.length > 0
+        ? "ready_with_rows"
+        : "ready_no_entities";
+
   const onStatusFilterChange = (event: SelectChangeEvent<DocumentStatus | "">): void => {
     setStatusFilter((event.target.value as DocumentStatus | "") ?? "");
   };
@@ -304,6 +445,7 @@ export function DocumentsPage(): JSX.Element {
   };
 
   const onSetPublic = (documentId: string): void => {
+    setPublicMutation.reset();
     setPublicMutation.mutate(documentId);
   };
 
@@ -312,7 +454,57 @@ export function DocumentsPage(): JSX.Element {
       return;
     }
 
+    removeDocumentMutation.reset();
     removeDocumentMutation.mutate(documentId);
+  };
+
+  const openCreateProjectSeedDialog = (documentId: string, documentName: string): void => {
+    createProjectSeedMutation.reset();
+    setSeedDocumentId(documentId);
+    setNewProjectName(`${documentName} Graph`);
+    setNewProjectDescription("");
+    setCreateSeedDialogOpen(true);
+  };
+
+  const openAddToProjectSeedDialog = (documentId: string): void => {
+    addProjectSeedMutation.reset();
+    setSeedDocumentId(documentId);
+    setTargetProjectId("");
+    setAddSeedDialogOpen(true);
+  };
+
+  const closeCreateSeedDialog = (): void => {
+    setCreateSeedDialogOpen(false);
+    setSeedDocumentId(null);
+  };
+
+  const closeAddSeedDialog = (): void => {
+    setAddSeedDialogOpen(false);
+    setSeedDocumentId(null);
+    setTargetProjectId("");
+  };
+
+  const submitCreateProjectSeed = (): void => {
+    if (!seedDocumentId || newProjectName.trim().length === 0) {
+      return;
+    }
+
+    createProjectSeedMutation.mutate({
+      documentId: seedDocumentId,
+      name: newProjectName,
+      description: newProjectDescription
+    });
+  };
+
+  const submitAddToProjectSeed = (): void => {
+    if (!seedDocumentId || targetProjectId.length === 0) {
+      return;
+    }
+
+    addProjectSeedMutation.mutate({
+      documentId: seedDocumentId,
+      projectId: targetProjectId
+    });
   };
 
   return (
@@ -469,6 +661,10 @@ export function DocumentsPage(): JSX.Element {
           </Stack>
         </Stack>
 
+        <Alert sx={{ mb: 2 }} severity="info">
+          Flow: Upload document, wait for completed status, then seed or create a project graph.
+        </Alert>
+
         {setPublicMutation.error instanceof Error && (
           <Alert sx={{ mb: 2 }} severity="error">
             Backend could not update document visibility: {setPublicMutation.error.message}
@@ -477,6 +673,16 @@ export function DocumentsPage(): JSX.Element {
         {removeDocumentMutation.error instanceof Error && (
           <Alert sx={{ mb: 2 }} severity="error">
             Backend could not remove your document ownership: {removeDocumentMutation.error.message}
+          </Alert>
+        )}
+        {createProjectSeedMutation.error && (
+          <Alert sx={{ mb: 2 }} severity="error">
+            {formatProjectSeedError(createProjectSeedMutation.error)}
+          </Alert>
+        )}
+        {addProjectSeedMutation.error && (
+          <Alert sx={{ mb: 2 }} severity="error">
+            {formatProjectSeedError(addProjectSeedMutation.error)}
           </Alert>
         )}
 
@@ -532,6 +738,26 @@ export function DocumentsPage(): JSX.Element {
                       >
                         Remove
                       </Button>
+                      {document.status === "completed" && (
+                        <>
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            onClick={() => openCreateProjectSeedDialog(document.id, document.fileName)}
+                            disabled={createProjectSeedMutation.isPending || addProjectSeedMutation.isPending}
+                          >
+                            Create Project
+                          </Button>
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            onClick={() => openAddToProjectSeedDialog(document.id)}
+                            disabled={createProjectSeedMutation.isPending || addProjectSeedMutation.isPending}
+                          >
+                            Add to Project
+                          </Button>
+                        </>
+                      )}
                     </Stack>
                   </TableCell>
                 </TableRow>
@@ -597,32 +823,35 @@ export function DocumentsPage(): JSX.Element {
                 />
               </Stack>
 
-              {!selectedDocumentQuery.data ? null : selectedDocumentStatus !== "completed" ? (
-                <Alert severity={selectedDocumentStatus === "failed" ? "warning" : "info"}>
-                  {selectedDocumentStatus === "failed"
-                    ? `Document processing failed, so extracted entities are unavailable${
-                        selectedDocumentQuery.data.error_message
-                          ? `: ${selectedDocumentQuery.data.error_message}`
-                          : "."
-                      }`
-                    : `Extracted entities are not available yet. Current status: ${selectedDocumentStatus}.`}
-                </Alert>
-              ) : documentEntitiesQuery.isLoading ? (
-                <Stack direction="row" spacing={1} alignItems="center">
-                  <CircularProgress size={18} />
-                  <Typography>Loading extracted entities...</Typography>
-                </Stack>
-              ) : documentEntitiesQuery.error instanceof Error ? (
-                <Alert severity="error">
-                  Backend could not load extracted entities for this document: {documentEntitiesQuery.error.message}
-                </Alert>
-              ) : (
-                <>
-                  <Typography variant="body2" color="text.secondary">
-                    Total entities: {documentEntitiesQuery.data?.total ?? 0}
-                  </Typography>
-                  <List dense>
-                    {(documentEntitiesQuery.data?.results ?? []).map((entity) => (
+              {selectedDocumentQuery.data && (
+                <Typography variant="body2" color="text.secondary">
+                  Total entities: {displayedEntityTotal}
+                </Typography>
+              )}
+
+              <Box sx={{ minHeight: ENTITY_PANEL_MIN_HEIGHT }}>
+                {!selectedDocumentQuery.data ? null : selectedDocumentStatus !== "completed" ? (
+                  <Alert severity={selectedDocumentStatus === "failed" ? "warning" : "info"}>
+                    {selectedDocumentStatus === "failed"
+                      ? `Document processing failed, so extracted entities are unavailable${
+                          selectedDocumentQuery.data.error_message
+                            ? `: ${selectedDocumentQuery.data.error_message}`
+                            : "."
+                        }`
+                      : `Extracted entities are not available yet. Current status: ${selectedDocumentStatus}.`}
+                  </Alert>
+                ) : entityPanelState === "loading" ? (
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <CircularProgress size={18} />
+                    <Typography>Loading extracted entities...</Typography>
+                  </Stack>
+                ) : entityPanelState === "details_temporarily_unavailable" ? (
+                  <Alert severity="info">
+                    {displayedEntityTotal} entities were extracted. Detailed entity rows are temporarily unavailable.
+                  </Alert>
+                ) : entityPanelState === "ready_with_rows" ? (
+                  <List dense sx={{ maxHeight: 240, overflowY: "auto" }}>
+                    {entityResults.map((entity) => (
                       <ListItem key={entity.id} disableGutters>
                         <ListItemText
                           primary={getEntityLabel(entity)}
@@ -630,18 +859,110 @@ export function DocumentsPage(): JSX.Element {
                         />
                       </ListItem>
                     ))}
-                    {(documentEntitiesQuery.data?.results.length ?? 0) === 0 && (
-                      <ListItem disableGutters>
-                        <ListItemText primary="No entities returned for this document." />
-                      </ListItem>
-                    )}
                   </List>
-                </>
-              )}
+                ) : (
+                  <Typography color="text.secondary">
+                    {isSchemaFiltered
+                      ? "No entities match the current schema filter."
+                      : "No entities extracted from this document yet."}
+                  </Typography>
+                )}
+              </Box>
             </Stack>
           </CardContent>
         </Card>
       )}
+
+      <Dialog open={createSeedDialogOpen} onClose={closeCreateSeedDialog} fullWidth maxWidth="sm">
+        <DialogTitle>Create Project from Document</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <Typography variant="body2" color="text.secondary">
+              This creates a new project snapshot from extracted entities in the selected document.
+            </Typography>
+            <TextField
+              label="Project name"
+              value={newProjectName}
+              onChange={(event) => setNewProjectName(event.target.value)}
+              required
+              fullWidth
+            />
+            <TextField
+              label="Description"
+              value={newProjectDescription}
+              onChange={(event) => setNewProjectDescription(event.target.value)}
+              fullWidth
+              multiline
+              minRows={3}
+            />
+            {createProjectSeedMutation.error && (
+              <Alert severity="error">{formatProjectSeedError(createProjectSeedMutation.error)}</Alert>
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={closeCreateSeedDialog}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={submitCreateProjectSeed}
+            disabled={createProjectSeedMutation.isPending || newProjectName.trim().length === 0}
+          >
+            {createProjectSeedMutation.isPending ? "Creating..." : "Create & Open Graph"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={addSeedDialogOpen} onClose={closeAddSeedDialog} fullWidth maxWidth="sm">
+        <DialogTitle>Add Document Entities to Existing Project</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <Typography variant="body2" color="text.secondary">
+              Select a target project. The selected document&apos;s entities will be merged into its snapshot.
+            </Typography>
+            {projectOptionsQuery.isLoading ? (
+              <Stack direction="row" spacing={1} alignItems="center">
+                <CircularProgress size={18} />
+                <Typography>Loading projects...</Typography>
+              </Stack>
+            ) : projectOptionsQuery.error instanceof Error ? (
+              <Alert severity="error">{projectOptionsQuery.error.message}</Alert>
+            ) : (
+              <FormControl fullWidth size="small">
+                <InputLabel id="seed-target-project-label">Project</InputLabel>
+                <Select
+                  labelId="seed-target-project-label"
+                  label="Project"
+                  value={targetProjectId}
+                  onChange={(event) => setTargetProjectId(event.target.value)}
+                >
+                  {(projectOptionsQuery.data?.results ?? []).map((project) => (
+                    <MenuItem key={project.id} value={project.id}>
+                      {project.name}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            )}
+            {addProjectSeedMutation.error && (
+              <Alert severity="error">{formatProjectSeedError(addProjectSeedMutation.error)}</Alert>
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={closeAddSeedDialog}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={submitAddToProjectSeed}
+            disabled={
+              addProjectSeedMutation.isPending ||
+              targetProjectId.length === 0 ||
+              (projectOptionsQuery.data?.results.length ?? 0) === 0
+            }
+          >
+            {addProjectSeedMutation.isPending ? "Adding..." : "Add & Open Graph"}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Stack>
   );
 }

@@ -139,7 +139,7 @@ export function ProjectsPage(): JSX.Element {
             Projects
           </Typography>
           <Typography variant="body1" color="text.secondary">
-            Manage your saved snapshot projects.
+            Manage saved graph snapshots. Documents remain independent sources.
           </Typography>
         </Box>
 
@@ -150,13 +150,17 @@ export function ProjectsPage(): JSX.Element {
             variant="outlined"
             startIcon={<UploadFileIcon />}
           >
-            Documents
+            Seed from Documents
           </Button>
           <Button startIcon={<AddIcon />} variant="contained" onClick={() => setCreateOpen(true)}>
             New Project
           </Button>
         </Stack>
       </Stack>
+
+      <Alert severity="info">
+        Flow: upload documents, extract entities, seed or create a project snapshot, then explore graph.
+      </Alert>
 
       {createProjectMutation.error instanceof Error && (
         <Alert severity="error">{createProjectMutation.error.message}</Alert>
@@ -181,7 +185,7 @@ export function ProjectsPage(): JSX.Element {
               No saved projects
             </Typography>
             <Typography color="text.secondary">
-              Create your first project to persist a graph snapshot.
+              Create a blank project or seed one from documents to persist a graph snapshot.
             </Typography>
           </CardContent>
         </Card>

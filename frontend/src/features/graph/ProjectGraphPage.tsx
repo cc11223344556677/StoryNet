@@ -45,61 +45,20 @@ import { GraphRendererHost } from "./renderers/GraphRendererHost";
 import { graphRendererDefinitions } from "./renderers/registry";
 import { getInitialGraphRendererId, persistGraphRendererId } from "./renderers/rendererConfig";
 import type { GraphRendererId } from "./renderers/types";
-
-const ENTITY_ID_LIKE_PATTERN = /^[A-Za-z0-9._:-]{3,}$/;
+import { fetchEntityRelationshipsPaginated } from "./neighborhoodFetch";
+import {
+  collectRelationshipReferences,
+  mergeSnapshot,
+  removeEntityFromSnapshot
+} from "./snapshotUtils";
 
 interface NeighborhoodQueryResult {
   centerId: string;
   neighborhood: EntityNeighborhood;
   relationshipEntities: FtMEntity[];
   entitiesForSnapshot: FtMEntity[];
-}
-
-function looksLikeEntityId(value: string): boolean {
-  const trimmed = value.trim();
-  if (!ENTITY_ID_LIKE_PATTERN.test(trimmed)) {
-    return false;
-  }
-
-  if (/\s/.test(trimmed)) {
-    return false;
-  }
-
-  if (/^\d+$/.test(trimmed)) {
-    return false;
-  }
-
-  return trimmed.includes("_") || trimmed.includes(":") || trimmed.includes("-") || /^[0-9a-fA-F]{8,}$/.test(trimmed);
-}
-
-function collectRelationshipReferences(relationship: FtMEntity): string[] {
-  const ids = new Set<string>();
-
-  for (const values of Object.values(relationship.properties)) {
-    for (const value of values) {
-      if (looksLikeEntityId(value)) {
-        ids.add(value);
-      }
-    }
-  }
-
-  return [...ids];
-}
-
-function mergeSnapshot(base: ProjectSnapshot, newEntities: FtMEntity[], viewportPatch: Record<string, unknown>): ProjectSnapshot {
-  const byId = new Map<string, FtMEntity>(base.entities.map((entity) => [entity.id, entity]));
-
-  for (const entity of newEntities) {
-    byId.set(entity.id, entity);
-  }
-
-  return {
-    entities: [...byId.values()],
-    viewport: {
-      ...(base.viewport ?? {}),
-      ...viewportPatch
-    }
-  };
+  partialRelationshipsLoaded: boolean;
+  partialLoadMessage: string | null;
 }
 
 function createEmptySnapshot(): ProjectSnapshot {
@@ -118,14 +77,20 @@ export function ProjectGraphPage(): JSX.Element {
   const { projectId } = useParams<{ projectId: string }>();
   const queryClient = useQueryClient();
 
-  const [searchInput, setSearchInput] = useState("");
-  const [activeQuery, setActiveQuery] = useState("");
+  const [snapshotSearchInput, setSnapshotSearchInput] = useState("");
+  const [snapshotActiveQuery, setSnapshotActiveQuery] = useState("");
+  const [globalSearchInput, setGlobalSearchInput] = useState("");
+  const [globalActiveQuery, setGlobalActiveQuery] = useState("");
   const [selectedEntityId, setSelectedEntityId] = useState<string | null>(null);
+  const [entitySelectionVersion, setEntitySelectionVersion] = useState(0);
   const [selectedRelationshipId, setSelectedRelationshipId] = useState<string | null>(null);
   const [displayNeighborhood, setDisplayNeighborhood] = useState<EntityNeighborhood | null>(null);
-  const [isResultsCollapsed, setIsResultsCollapsed] = useState(false);
+  const [isSnapshotResultsCollapsed, setIsSnapshotResultsCollapsed] = useState(false);
+  const [isGlobalResultsCollapsed, setIsGlobalResultsCollapsed] = useState(false);
   const [rendererId, setRendererId] = useState<GraphRendererId>(() => getInitialGraphRendererId());
   const [workingSnapshot, setWorkingSnapshot] = useState<ProjectSnapshot | null>(null);
+  const [isSnapshotDirty, setIsSnapshotDirty] = useState(false);
+  const [partialNeighborhoodMessage, setPartialNeighborhoodMessage] = useState<string | null>(null);
 
   const projectQuery = useQuery({
     queryKey: ["project", projectId],
@@ -140,11 +105,17 @@ export function ProjectGraphPage(): JSX.Element {
 
     setWorkingSnapshot(projectQuery.data.snapshot);
     setSelectedEntityId(null);
+    setEntitySelectionVersion(0);
     setSelectedRelationshipId(null);
     setDisplayNeighborhood(null);
-    setSearchInput("");
-    setActiveQuery("");
-    setIsResultsCollapsed(false);
+    setSnapshotSearchInput("");
+    setSnapshotActiveQuery("");
+    setGlobalSearchInput("");
+    setGlobalActiveQuery("");
+    setIsSnapshotResultsCollapsed(false);
+    setIsGlobalResultsCollapsed(false);
+    setIsSnapshotDirty(false);
+    setPartialNeighborhoodMessage(null);
   }, [projectQuery.data?.id]);
 
   const snapshotEntityMap = useMemo(() => {
@@ -170,38 +141,50 @@ export function ProjectGraphPage(): JSX.Element {
     return ids;
   }, [snapshotEntityMap]);
 
-  const searchQuery = useQuery({
-    queryKey: ["entity-search", projectId, activeQuery],
+  const snapshotSearchQuery = useQuery({
+    queryKey: ["entity-search", projectId, snapshotActiveQuery],
     queryFn: () =>
       apiClient.searchEntities({
-        q: activeQuery,
+        q: snapshotActiveQuery,
         page: 1,
         pageSize: 50,
         fuzzy: true
       }),
-    enabled: activeQuery.trim().length > 0
+    enabled: snapshotActiveQuery.trim().length > 0
   });
 
   const scopedSearchHits = useMemo<EntitySearchHit[]>(() => {
-    const entities = searchQuery.data?.results ?? [];
+    const entities = snapshotSearchQuery.data?.results ?? [];
 
     return entities
       .filter((entity) => searchableSnapshotIds.has(entity.id))
       .map((entity) => mapEntityToSearchHit(entity));
-  }, [searchQuery.data, searchableSnapshotIds]);
+  }, [snapshotSearchQuery.data, searchableSnapshotIds]);
 
-  const neighborhoodQuery = useQuery({
-    queryKey: ["entity-neighborhood", projectId, selectedEntityId],
-    enabled: Boolean(projectId && selectedEntityId),
-    queryFn: async (): Promise<NeighborhoodQueryResult> => {
-      const targetEntityId = selectedEntityId!;
+  const globalSearchQuery = useQuery({
+    queryKey: ["entity-search-global", projectId, globalActiveQuery],
+    queryFn: () =>
+      apiClient.searchEntities({
+        q: globalActiveQuery,
+        page: 1,
+        pageSize: 50,
+        fuzzy: true
+      }),
+    enabled: globalActiveQuery.trim().length > 0
+  });
 
-      const [centerEntity, relationshipsResponse] = await Promise.all([
+  const globalSearchHits = useMemo<EntitySearchHit[]>(() => {
+    return (globalSearchQuery.data?.results ?? []).map((entity) => mapEntityToSearchHit(entity));
+  }, [globalSearchQuery.data]);
+
+  const loadEntityNeighborhood = useCallback(
+    async (targetEntityId: string): Promise<NeighborhoodQueryResult> => {
+      const [centerEntity, relationshipsResult] = await Promise.all([
         apiClient.getEntity(targetEntityId),
-        apiClient.getEntityRelationships(targetEntityId, 1, 1, 200)
+        fetchEntityRelationshipsPaginated(apiClient, targetEntityId, 1)
       ]);
 
-      const relationshipEntities = relationshipsResponse.results;
+      const relationshipEntities = relationshipsResult.relationships;
       const entityById = new Map<string, FtMEntity>(snapshotEntityMap);
       entityById.set(centerEntity.id, centerEntity);
 
@@ -215,10 +198,8 @@ export function ProjectGraphPage(): JSX.Element {
       }
 
       const missingEntityIds = [...referencedIds].filter((id) => !entityById.has(id));
-
       if (missingEntityIds.length > 0) {
         const fetched = await Promise.allSettled(missingEntityIds.map((id) => apiClient.getEntity(id)));
-
         for (const result of fetched) {
           if (result.status === "fulfilled") {
             entityById.set(result.value.id, result.value);
@@ -227,7 +208,6 @@ export function ProjectGraphPage(): JSX.Element {
       }
 
       const neighborhood = buildNeighborhood(centerEntity, relationshipEntities, entityById);
-
       const entitiesForSnapshot = new Map<string, FtMEntity>();
       entitiesForSnapshot.set(centerEntity.id, centerEntity);
 
@@ -246,9 +226,18 @@ export function ProjectGraphPage(): JSX.Element {
         centerId: centerEntity.id,
         neighborhood,
         relationshipEntities,
-        entitiesForSnapshot: [...entitiesForSnapshot.values()]
+        entitiesForSnapshot: [...entitiesForSnapshot.values()],
+        partialRelationshipsLoaded: relationshipsResult.partialRelationshipsLoaded,
+        partialLoadMessage: relationshipsResult.partialLoadMessage
       };
-    }
+    },
+    [snapshotEntityMap]
+  );
+
+  const neighborhoodQuery = useQuery({
+    queryKey: ["entity-neighborhood", projectId, selectedEntityId, entitySelectionVersion],
+    enabled: Boolean(projectId && selectedEntityId),
+    queryFn: async (): Promise<NeighborhoodQueryResult> => loadEntityNeighborhood(selectedEntityId!)
   });
 
   const entityDocumentsQuery = useQuery({
@@ -278,16 +267,29 @@ export function ProjectGraphPage(): JSX.Element {
       return;
     }
 
+    setPartialNeighborhoodMessage(neighborhoodQuery.data.partialLoadMessage);
     setDisplayNeighborhood(neighborhoodQuery.data.neighborhood);
 
+    let changed = false;
     setWorkingSnapshot((current) => {
       const base = current ?? projectQuery.data?.snapshot ?? createEmptySnapshot();
-      return mergeSnapshot(base, neighborhoodQuery.data.entitiesForSnapshot, {
+      const merged = mergeSnapshot(base, neighborhoodQuery.data.entitiesForSnapshot, {
         renderer: rendererId,
         last_selected_entity: selectedEntityId
       });
+      changed = merged.changed;
+      return merged.snapshot;
     });
+    if (changed) {
+      setIsSnapshotDirty(true);
+    }
   }, [neighborhoodQuery.data, selectedEntityId, projectQuery.data, rendererId]);
+
+  useEffect(() => {
+    if (neighborhoodQuery.error instanceof Error) {
+      setPartialNeighborhoodMessage(null);
+    }
+  }, [neighborhoodQuery.error]);
 
   useEffect(() => {
     const relationships = neighborhoodQuery.data?.relationshipEntities ?? [];
@@ -340,6 +342,11 @@ export function ProjectGraphPage(): JSX.Element {
         return fromSearch.label;
       }
 
+      const fromGlobalSearch = globalSearchHits.find((hit) => hit.entityId === entityId);
+      if (fromGlobalSearch) {
+        return fromGlobalSearch.label;
+      }
+
       const fromSnapshot = snapshotEntityMap.get(entityId);
       if (fromSnapshot) {
         return getEntityLabel(fromSnapshot);
@@ -347,7 +354,7 @@ export function ProjectGraphPage(): JSX.Element {
 
       return "";
     },
-    [displayNeighborhood, scopedSearchHits, snapshotEntityMap]
+    [displayNeighborhood, globalSearchHits, scopedSearchHits, snapshotEntityMap]
   );
 
   const selectEntity = useCallback(
@@ -355,23 +362,35 @@ export function ProjectGraphPage(): JSX.Element {
       const fullLabel = resolveEntityLabel(entityId, explicitLabel);
 
       setSelectedEntityId(entityId);
+      setEntitySelectionVersion((current) => current + 1);
       setSelectedRelationshipId(null);
+      setDisplayNeighborhood(null);
+      setPartialNeighborhoodMessage(null);
       if (fullLabel) {
-        setSearchInput(fullLabel);
+        setSnapshotSearchInput(fullLabel);
+        setGlobalSearchInput(fullLabel);
       }
 
-      setIsResultsCollapsed(true);
-      setActiveQuery("");
+      setIsSnapshotResultsCollapsed(true);
+      setSnapshotActiveQuery("");
     },
     [resolveEntityLabel]
   );
 
-  const submitSearch = (event: FormEvent): void => {
+  const submitSnapshotSearch = (event: FormEvent): void => {
     event.preventDefault();
 
-    const trimmed = searchInput.trim();
-    setActiveQuery(trimmed);
-    setIsResultsCollapsed(false);
+    const trimmed = snapshotSearchInput.trim();
+    setSnapshotActiveQuery(trimmed);
+    setIsSnapshotResultsCollapsed(false);
+  };
+
+  const submitGlobalSearch = (event: FormEvent): void => {
+    event.preventDefault();
+
+    const trimmed = globalSearchInput.trim();
+    setGlobalActiveQuery(trimmed);
+    setIsGlobalResultsCollapsed(false);
   };
 
   const handleNodeClick = useCallback(
@@ -383,6 +402,40 @@ export function ProjectGraphPage(): JSX.Element {
 
   const onSelectRelationship = (relationshipId: string): void => {
     setSelectedRelationshipId(relationshipId);
+  };
+
+  const onAddGlobalEntity = (entityId: string, label: string): void => {
+    setIsGlobalResultsCollapsed(true);
+    selectEntity(entityId, label);
+  };
+
+  const onRemoveSnapshotEntity = (entityId: string): void => {
+    let changed = false;
+    let removedRelationshipIds: string[] = [];
+
+    setWorkingSnapshot((current) => {
+      const base = current ?? projectQuery.data?.snapshot ?? createEmptySnapshot();
+      const result = removeEntityFromSnapshot(base, entityId);
+      changed = result.changed;
+      removedRelationshipIds = result.removedRelationshipIds;
+      return result.snapshot;
+    });
+
+    if (!changed) {
+      return;
+    }
+
+    setIsSnapshotDirty(true);
+
+    if (selectedEntityId === entityId) {
+      setSelectedEntityId(null);
+      setDisplayNeighborhood(null);
+      setPartialNeighborhoodMessage(null);
+    }
+
+    if (selectedRelationshipId && removedRelationshipIds.includes(selectedRelationshipId)) {
+      setSelectedRelationshipId(null);
+    }
   };
 
   const handleRendererChange = (event: SelectChangeEvent<GraphRendererId>): void => {
@@ -416,6 +469,7 @@ export function ProjectGraphPage(): JSX.Element {
     },
     onSuccess: async (updatedProject) => {
       setWorkingSnapshot(updatedProject.snapshot);
+      setIsSnapshotDirty(false);
       await queryClient.invalidateQueries({ queryKey: ["project", projectId] });
       await queryClient.invalidateQueries({ queryKey: ["projects"] });
     }
@@ -431,6 +485,11 @@ export function ProjectGraphPage(): JSX.Element {
       nodeCount,
       relationshipCount
     };
+  }, [workingSnapshot, projectQuery.data]);
+
+  const snapshotEntities = useMemo(() => {
+    const entities = workingSnapshot?.entities ?? projectQuery.data?.snapshot.entities ?? [];
+    return [...entities].sort((a, b) => getEntityLabel(a).localeCompare(getEntityLabel(b)));
   }, [workingSnapshot, projectQuery.data]);
 
   const selectedEntityLabel = selectedEntityId ? resolveEntityLabel(selectedEntityId) : "";
@@ -469,7 +528,7 @@ export function ProjectGraphPage(): JSX.Element {
             Graph Explorer
           </Typography>
           <Typography color="text.secondary">
-            {projectQuery.data.name} - project-scoped entity search from this snapshot.
+            {projectQuery.data.name} - curated snapshot graph powered by live backend entities.
           </Typography>
         </Box>
 
@@ -488,10 +547,14 @@ export function ProjectGraphPage(): JSX.Element {
             onClick={() => saveSnapshotMutation.mutate()}
             disabled={saveSnapshotMutation.isPending}
           >
-            {saveSnapshotMutation.isPending ? "Saving..." : "Save Snapshot"}
+            {saveSnapshotMutation.isPending ? "Saving..." : isSnapshotDirty ? "Save Snapshot *" : "Save Snapshot"}
           </Button>
         </Stack>
       </Stack>
+
+      <Alert severity="info">
+        Flow: search snapshot or global entities, add or remove from snapshot, then save to persist graph state.
+      </Alert>
 
       <Card variant="outlined">
         <CardContent>
@@ -525,6 +588,11 @@ export function ProjectGraphPage(): JSX.Element {
           {saveSnapshotMutation.error instanceof Error && (
             <Alert sx={{ mt: 2 }} severity="error">
               {saveSnapshotMutation.error.message}
+            </Alert>
+          )}
+          {isSnapshotDirty && !saveSnapshotMutation.isPending && (
+            <Alert sx={{ mt: 2 }} severity="warning">
+              Snapshot has unsaved changes.
             </Alert>
           )}
           {saveSnapshotMutation.isSuccess && (
@@ -564,42 +632,44 @@ export function ProjectGraphPage(): JSX.Element {
           </FormControl>
         </Stack>
 
-        <form onSubmit={submitSearch}>
+        <form onSubmit={submitSnapshotSearch}>
           <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
             <TextField
               fullWidth
-              label="Search entity in this project snapshot"
+              label="Search within snapshot"
               placeholder="e.g. Eleanor Grant"
-              value={searchInput}
-              onChange={(event) => setSearchInput(event.target.value)}
+              value={snapshotSearchInput}
+              onChange={(event) => setSnapshotSearchInput(event.target.value)}
             />
             <Button
               type="submit"
               variant="contained"
               startIcon={<SearchIcon />}
-              disabled={searchInput.trim().length === 0}
+              disabled={snapshotSearchInput.trim().length === 0}
             >
-              Search
+              Search Snapshot
             </Button>
           </Stack>
         </form>
 
         <Divider sx={{ my: 2 }} />
 
-        {searchQuery.isFetching && (
+        {snapshotSearchQuery.isFetching && (
           <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2 }}>
             <CircularProgress size={20} />
-            <Typography variant="body2">Searching live entities...</Typography>
+            <Typography variant="body2">Searching snapshot entities...</Typography>
           </Stack>
         )}
 
-        {searchQuery.error instanceof Error && <Alert severity="error">{searchQuery.error.message}</Alert>}
+        {snapshotSearchQuery.error instanceof Error && (
+          <Alert severity="error">{snapshotSearchQuery.error.message}</Alert>
+        )}
 
-        {!isResultsCollapsed && activeQuery && (
+        {!isSnapshotResultsCollapsed && snapshotActiveQuery && (
           <>
             {scopedSearchHits.length === 0 ? (
               <Alert severity="info">
-                No snapshot entity matches for "{activeQuery}".
+                No snapshot entity matches for "{snapshotActiveQuery}".
               </Alert>
             ) : (
               <List dense sx={{ border: "1px solid #e1e7f3", borderRadius: 1, mb: 2 }}>
@@ -616,7 +686,123 @@ export function ProjectGraphPage(): JSX.Element {
             )}
           </>
         )}
+
+        <Divider sx={{ my: 2 }} />
+
+        <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>
+          Global Backend Search
+        </Typography>
+
+        <form onSubmit={submitGlobalSearch}>
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
+            <TextField
+              fullWidth
+              label="Search all visible backend entities"
+              placeholder="e.g. Acme Corp"
+              value={globalSearchInput}
+              onChange={(event) => setGlobalSearchInput(event.target.value)}
+            />
+            <Button
+              type="submit"
+              variant="outlined"
+              startIcon={<SearchIcon />}
+              disabled={globalSearchInput.trim().length === 0}
+            >
+              Search Global
+            </Button>
+          </Stack>
+        </form>
+
+        {globalSearchQuery.isFetching && (
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 2 }}>
+            <CircularProgress size={20} />
+            <Typography variant="body2">Searching backend entities...</Typography>
+          </Stack>
+        )}
+
+        {globalSearchQuery.error instanceof Error && (
+          <Alert sx={{ mt: 2 }} severity="error">
+            {globalSearchQuery.error.message}
+          </Alert>
+        )}
+
+        {!isGlobalResultsCollapsed && globalActiveQuery && (
+          <>
+            {globalSearchHits.length === 0 ? (
+              <Alert sx={{ mt: 2 }} severity="info">
+                No global entities match "{globalActiveQuery}".
+              </Alert>
+            ) : (
+              <List dense sx={{ border: "1px solid #e1e7f3", borderRadius: 1, mt: 2 }}>
+                {globalSearchHits.map((hit) => (
+                  <ListItem key={hit.entityId} disableGutters>
+                    <Stack
+                      direction={{ xs: "column", sm: "row" }}
+                      spacing={1}
+                      alignItems={{ xs: "stretch", sm: "center" }}
+                      justifyContent="space-between"
+                      sx={{ width: "100%" }}
+                    >
+                      <ListItemText primary={hit.label} secondary={`${hit.type} - ${hit.entityId}`} />
+                      <Stack direction="row" spacing={1}>
+                        <Button size="small" variant="outlined" onClick={() => selectEntity(hit.entityId, hit.label)}>
+                          Inspect
+                        </Button>
+                        <Button size="small" variant="contained" onClick={() => onAddGlobalEntity(hit.entityId, hit.label)}>
+                          Add to Snapshot
+                        </Button>
+                      </Stack>
+                    </Stack>
+                  </ListItem>
+                ))}
+              </List>
+            )}
+          </>
+        )}
       </Paper>
+
+      <Card variant="outlined">
+        <CardContent>
+          <Stack spacing={2}>
+            <Typography variant="h6" sx={{ fontWeight: 700 }}>
+              Snapshot Curation
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              Remove entities from this project snapshot. Relationship entities tied to removed nodes are also removed.
+            </Typography>
+            {snapshotEntities.length === 0 ? (
+              <Alert severity="info">Snapshot currently has no entities.</Alert>
+            ) : (
+              <List dense sx={{ border: "1px solid #e1e7f3", borderRadius: 1, maxHeight: 260, overflowY: "auto" }}>
+                {snapshotEntities.map((entity) => (
+                  <ListItem key={entity.id} disableGutters>
+                    <Stack
+                      direction={{ xs: "column", sm: "row" }}
+                      spacing={1}
+                      alignItems={{ xs: "stretch", sm: "center" }}
+                      justifyContent="space-between"
+                      sx={{ width: "100%" }}
+                    >
+                      <ListItemText
+                        primary={getEntityLabel(entity)}
+                        secondary={`${entity.schema} - ${entity.id}`}
+                      />
+                      <Button
+                        size="small"
+                        color="error"
+                        variant="outlined"
+                        onClick={() => onRemoveSnapshotEntity(entity.id)}
+                      >
+                        Remove
+                      </Button>
+                    </Stack>
+                  </ListItem>
+                ))}
+              </List>
+            )}
+          </Stack>
+        </CardContent>
+      </Card>
 
       {selectedEntityId && neighborhoodQuery.isFetching && (
         <Stack direction="row" spacing={1} alignItems="center">
@@ -627,8 +813,13 @@ export function ProjectGraphPage(): JSX.Element {
 
       {neighborhoodQuery.error instanceof Error && (
         <Alert severity="error">
-          Backend unavailable for this operation: {neighborhoodQuery.error.message}
+          Could not load live relationships for this entity. Please try Inspect again. Backend error:{" "}
+          {neighborhoodQuery.error.message}
         </Alert>
+      )}
+
+      {partialNeighborhoodMessage && (
+        <Alert severity="info">{partialNeighborhoodMessage}</Alert>
       )}
 
       {displayNeighborhood ? (
@@ -642,7 +833,7 @@ export function ProjectGraphPage(): JSX.Element {
         </Box>
       ) : (
         <Alert severity="info">
-          Search a project entity and select it to render its live relationship neighborhood.
+          Select an entity from snapshot or global search to render its live relationship neighborhood.
         </Alert>
       )}
 

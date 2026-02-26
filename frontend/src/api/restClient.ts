@@ -449,7 +449,8 @@ export class RestStoryNetApiClient implements ApiClient {
     page = 1,
     pageSize = 50
   ): Promise<EntitySearchResponse> {
-    const query = buildQueryString({ depth, page, page_size: pageSize });
+    const boundedPageSize = Math.min(Math.max(1, pageSize), 100);
+    const query = buildQueryString({ depth, page, page_size: boundedPageSize });
 
     return this.request(
       `/entities/${encodeURIComponent(id)}/relationships${query}`,

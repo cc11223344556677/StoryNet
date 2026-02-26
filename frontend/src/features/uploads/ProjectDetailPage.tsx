@@ -126,7 +126,9 @@ export function ProjectDetailPage(): JSX.Element {
           <Typography variant="h4" sx={{ fontWeight: 700 }}>
             {projectQuery.data.name}
           </Typography>
-          <Typography color="text.secondary">Snapshot-backed project detail and save controls.</Typography>
+          <Typography color="text.secondary">
+            Project snapshot details. A project stores graph state, not document ownership.
+          </Typography>
         </Box>
 
         <Stack direction="row" spacing={1.2}>
@@ -134,7 +136,7 @@ export function ProjectDetailPage(): JSX.Element {
             Projects
           </Button>
           <Button component={RouterLink} to="/documents" variant="outlined" startIcon={<UploadFileIcon />}>
-            Documents
+            Seed from Documents
           </Button>
           <Button
             component={RouterLink}
