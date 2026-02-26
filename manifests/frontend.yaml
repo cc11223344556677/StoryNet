@@ -17,6 +17,9 @@ spec:
         - name: frontend
           image: frontend:latest
           imagePullPolicy: Never
+          env:
+            - name: API_UPSTREAM
+              value: backend-service.app.svc.cluster.local:8080
           ports:
             - containerPort: 80
           resources:

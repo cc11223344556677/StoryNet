@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DocumentDto, FtMEntity } from "../types/domain";
 
@@ -68,9 +69,13 @@ function renderPage(): void {
   });
 
   render(
-    <QueryClientProvider client={queryClient}>
-      <DocumentsPage />
-    </QueryClientProvider>
+    <MemoryRouter initialEntries={["/documents"]}>
+      <QueryClientProvider client={queryClient}>
+        <Routes>
+          <Route path="/documents" element={<DocumentsPage />} />
+        </Routes>
+      </QueryClientProvider>
+    </MemoryRouter>
   );
 }
 
@@ -112,6 +117,10 @@ describe("document to project seeding flow", () => {
       expect(mockApiClient.createProject).toHaveBeenCalledTimes(1);
       expect(mockNavigate).toHaveBeenCalledWith("/projects/project-1/graph");
     });
+
+    const createPayload = vi.mocked(mockApiClient.createProject).mock.calls[0][0];
+    expect(createPayload.snapshot).toBeDefined();
+    expect(createPayload.snapshot).not.toHaveProperty("viewport");
   });
 
   it("shows hard error when document reports entities but endpoint returns empty list", async () => {
@@ -187,5 +196,9 @@ describe("document to project seeding flow", () => {
       expect(mockApiClient.updateProject).toHaveBeenCalledTimes(1);
       expect(mockNavigate).toHaveBeenCalledWith("/projects/project-1/graph");
     });
+
+    const updatePayload = vi.mocked(mockApiClient.updateProject).mock.calls[0][1];
+    expect(updatePayload.snapshot).toBeDefined();
+    expect(updatePayload.snapshot).not.toHaveProperty("viewport");
   });
 });

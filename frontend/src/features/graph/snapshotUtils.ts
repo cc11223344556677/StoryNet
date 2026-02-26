@@ -52,35 +52,24 @@ export function collectRelationshipReferences(relationship: FtMEntity): string[]
 
 export function mergeSnapshot(
   base: ProjectSnapshot,
-  newEntities: FtMEntity[],
-  viewportPatch: Record<string, unknown>
+  newEntities: FtMEntity[]
 ): MergeSnapshotResult {
   const byId = new Map<string, FtMEntity>(base.entities.map((entity) => [entity.id, entity]));
   let changed = false;
 
   for (const entity of newEntities) {
-    if (!byId.has(entity.id)) {
+    const existing = byId.get(entity.id);
+    if (!existing || JSON.stringify(existing) !== JSON.stringify(entity)) {
       changed = true;
     }
     byId.set(entity.id, entity);
-  }
-
-  const mergedViewport = {
-    ...(base.viewport ?? {}),
-    ...viewportPatch
-  };
-
-  for (const [key, value] of Object.entries(viewportPatch)) {
-    if ((base.viewport ?? {})[key] !== value) {
-      changed = true;
-    }
   }
 
   return {
     changed,
     snapshot: {
       entities: [...byId.values()],
-      viewport: mergedViewport
+      viewport: base.viewport ?? {}
     }
   };
 }

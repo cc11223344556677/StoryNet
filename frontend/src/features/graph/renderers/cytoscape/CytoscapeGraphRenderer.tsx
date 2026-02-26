@@ -4,17 +4,24 @@ import type { GraphRendererProps } from "../types";
 import { CytoscapeGraphController } from "./CytoscapeGraphController";
 
 export default function CytoscapeGraphRenderer({
-  neighborhood,
+  graph,
   selectedNodeId,
-  onNodeClick
+  selectedEdgeId,
+  onNodeClick,
+  onEdgeClick
 }: GraphRendererProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const onNodeClickRef = useRef(onNodeClick);
+  const onEdgeClickRef = useRef(onEdgeClick);
   const controller = useMemo(() => new CytoscapeGraphController(), []);
 
   useEffect(() => {
     onNodeClickRef.current = onNodeClick;
   }, [onNodeClick]);
+
+  useEffect(() => {
+    onEdgeClickRef.current = onEdgeClick;
+  }, [onEdgeClick]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -38,15 +45,6 @@ export default function CytoscapeGraphRenderer({
             height: 46,
             "border-width": 2,
             "border-color": "#d0e2ff"
-          }
-        },
-        {
-          selector: "node.center-node",
-          style: {
-            "background-color": "#ff7a18",
-            width: 58,
-            height: 58,
-            "border-color": "#ffd7b5"
           }
         },
         {
@@ -79,6 +77,14 @@ export default function CytoscapeGraphRenderer({
             "text-background-opacity": 0.8,
             "text-background-padding": "3px"
           }
+        },
+        {
+          selector: "edge.selected-edge",
+          style: {
+            width: 4,
+            "line-color": "#111827",
+            "target-arrow-color": "#111827"
+          }
         }
       ],
       wheelSensitivity: 0.2
@@ -89,6 +95,10 @@ export default function CytoscapeGraphRenderer({
       const nodeId = event.target.id();
       const nodeLabel = String(event.target.data("label") ?? "");
       onNodeClickRef.current(nodeId, nodeLabel);
+    });
+    cy.on("tap", "edge", (event) => {
+      const edgeId = event.target.id();
+      onEdgeClickRef.current(edgeId);
     });
     cy.on("mouseover", "node", (event) => event.target.addClass("hovered-node"));
     cy.on("mouseout", "node", (event) => event.target.removeClass("hovered-node"));
@@ -106,12 +116,26 @@ export default function CytoscapeGraphRenderer({
   }, [controller]);
 
   useEffect(() => {
-    if (neighborhood) controller.renderNeighborhood(neighborhood);
-  }, [controller, neighborhood]);
+    controller.renderGraph(graph ?? { nodes: [], edges: [] });
+  }, [controller, graph]);
 
   useEffect(() => {
-    if (selectedNodeId) controller.selectNode(selectedNodeId);
+    if (selectedNodeId) {
+      controller.selectNode(selectedNodeId);
+      return;
+    }
+
+    controller.clearSelection();
   }, [controller, selectedNodeId]);
+
+  useEffect(() => {
+    if (selectedEdgeId) {
+      controller.selectEdge(selectedEdgeId);
+      return;
+    }
+
+    controller.clearEdgeSelection();
+  }, [controller, selectedEdgeId]);
 
   return <div ref={containerRef} className="graph-canvas" />;
 }

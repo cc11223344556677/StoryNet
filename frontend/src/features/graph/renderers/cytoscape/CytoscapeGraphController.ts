@@ -1,5 +1,6 @@
 import type { Core } from "cytoscape";
-import type { EntityNeighborhood, GraphCommandResult, GraphEdge, GraphNode } from "../../../../types/domain";
+import type { GraphCommandResult, GraphEdge, GraphNode } from "../../../../types/domain";
+import type { GraphRenderModel } from "../types";
 
 export class CytoscapeGraphController {
   private cy: Core | null = null;
@@ -7,28 +8,27 @@ export class CytoscapeGraphController {
   attach(cy: Core): void { this.cy = cy; }
   detach(): void { this.cy = null; }
 
-  renderNeighborhood(neighborhood: EntityNeighborhood): void {
+  renderGraph(graph: GraphRenderModel): void {
     if (!this.cy) return;
 
     const cy = this.cy;
 
-    const allNodes: GraphNode[] = [neighborhood.centerNode, ...neighborhood.neighborNodes];
-    const nodeIds = new Set(allNodes.map((node) => node.id));
-    const edges: GraphEdge[] = neighborhood.connectingEdges.filter(
+    const nodes: GraphNode[] = graph.nodes;
+    const nodeIds = new Set(nodes.map((node) => node.id));
+    const edges: GraphEdge[] = graph.edges.filter(
       (edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target)
     );
 
     const elements = [
-      ...allNodes.map((node) => ({
-        data: { id: node.id, label: node.label, type: node.type },
-        classes: node.id === neighborhood.centerNode.id ? "center-node" : ""
+      ...nodes.map((node) => ({
+        data: { id: node.id, label: node.label, type: node.type }
       })),
       ...edges.map((edge) => ({
         data: { id: edge.id, source: edge.source, target: edge.target, label: edge.relation }
       }))
     ];
 
-    // Stop any in-flight camera/layout motion before rendering the new neighborhood.
+    // Stop any in-flight camera/layout motion before rendering the graph.
     cy.stop();
     cy.elements().stop();
 
@@ -36,17 +36,14 @@ export class CytoscapeGraphController {
     cy.add(elements);
 
     const layout = cy.layout({
-      name: "breadthfirst",
-      roots: [neighborhood.centerNode.id],
-      directed: false,
+      name: "cose",
       animate: false,
       fit: false,
       padding: 80,
-      spacingFactor: 1.2
+      nodeOverlap: 10
     });
 
     layout.one("layoutstop", () => {
-      this.selectNode(neighborhood.centerNode.id);
       cy.fit(cy.elements(), 80);
     });
 
@@ -63,6 +60,29 @@ export class CytoscapeGraphController {
     if (!node || node.empty()) return;
 
     node.addClass("selected-node");
+  }
+
+  selectEdge(edgeId: string): void {
+    if (!this.cy) return;
+
+    const cy = this.cy;
+    cy.edges().removeClass("selected-edge");
+
+    const edge = cy.$id(edgeId);
+    if (!edge || edge.empty()) return;
+
+    edge.addClass("selected-edge");
+  }
+
+  clearEdgeSelection(): void {
+    if (!this.cy) return;
+    this.cy.edges().removeClass("selected-edge");
+  }
+
+  clearSelection(): void {
+    if (!this.cy) return;
+    this.cy.nodes().removeClass("selected-node");
+    this.cy.edges().removeClass("selected-edge");
   }
 
   // Reserved extension hooks for later graph editing phases.

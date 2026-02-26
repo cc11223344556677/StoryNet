@@ -25,9 +25,7 @@ function makeSnapshot(entities: FtMEntity[]): ProjectSnapshot {
 describe("project graph snapshot utilities", () => {
   it("mergeSnapshot adds deduped entities and marks changed", () => {
     const base = makeSnapshot([makeEntity("a"), makeEntity("b")]);
-    const merged = mergeSnapshot(base, [makeEntity("b"), makeEntity("c"), makeEntity("d")], {
-      renderer: "cytoscape"
-    });
+    const merged = mergeSnapshot(base, [makeEntity("b"), makeEntity("c"), makeEntity("d")]);
 
     expect(merged.changed).toBe(true);
     expect(merged.snapshot.entities.map((entity) => entity.id).sort()).toEqual(["a", "b", "c", "d"]);
@@ -45,5 +43,13 @@ describe("project graph snapshot utilities", () => {
     expect(removed.changed).toBe(true);
     expect(removed.removedRelationshipIds).toEqual(["rel-1"]);
     expect(removed.snapshot.entities.map((entity) => entity.id).sort()).toEqual(["person-2", "rel-2"]);
+  });
+
+  it("mergeSnapshot does not mark changed when incoming entities are identical", () => {
+    const base = makeSnapshot([makeEntity("a"), makeEntity("b")]);
+    const merged = mergeSnapshot(base, [makeEntity("a"), makeEntity("b")]);
+
+    expect(merged.changed).toBe(false);
+    expect(merged.snapshot.entities.map((entity) => entity.id).sort()).toEqual(["a", "b"]);
   });
 });

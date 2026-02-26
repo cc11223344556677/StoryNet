@@ -1,8 +1,8 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ApiClient, DocumentDto, FtMEntity, ProjectDto } from "../types/domain";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ApiClient, DocumentDto, FtMEntity, ProjectDto, UpdateProjectRequest } from "../types/domain";
 
 const { mockApiClient } = vi.hoisted(() => ({
   mockApiClient: {
@@ -75,7 +75,9 @@ function makeEntity(overrides: Partial<FtMEntity> = {}): FtMEntity {
     id: "afa5a9d77ad726ee2c99d9e691db42b74300e805",
     schema: "Person",
     caption: "Marko Petrovic",
-    properties: {},
+    properties: {
+      name: ["Marko Petrovic"]
+    },
     ...overrides
   };
 }
@@ -130,19 +132,19 @@ async function runGlobalInspectSearch(term: string): Promise<void> {
   fireEvent.click(await screen.findByRole("button", { name: "Inspect" }));
 }
 
-describe("project graph global inspect", () => {
-  afterEach(() => {
-    cleanup();
-  });
-
+describe("project graph save snapshot", () => {
   beforeEach(() => {
     vi.clearAllMocks();
 
+    const liveEntity = makeEntity({
+      first_seen: "2026-02-26T10:00:00Z",
+      last_changed: "2026-02-26T11:00:00Z"
+    });
+
     mockApiClient.getProject.mockResolvedValue(makeProject());
-    mockApiClient.searchEntities.mockResolvedValue(
-      makeEntitySearchResponse([makeEntity()])
-    );
-    mockApiClient.getEntity.mockResolvedValue(makeEntity());
+    mockApiClient.searchEntities.mockResolvedValue(makeEntitySearchResponse([liveEntity]));
+    mockApiClient.getEntity.mockResolvedValue(liveEntity);
+    mockApiClient.getEntityRelationships.mockResolvedValue(makeEntitySearchResponse([], 0, 1));
     mockApiClient.getEntityDocuments.mockResolvedValue(makeDocumentList());
     mockApiClient.getRelationship.mockResolvedValue(
       makeEntity({
@@ -153,96 +155,46 @@ describe("project graph global inspect", () => {
       })
     );
     mockApiClient.getRelationshipDocuments.mockResolvedValue(makeDocumentList());
-  });
-
-  it("inspects a global search entity using page_size=100 (no page-size 400 path)", async () => {
-    mockApiClient.getEntityRelationships.mockImplementation(async (_id, _depth, page, pageSize) => {
-      if ((pageSize ?? 50) > 100) {
-        throw new Error("Request failed with status 400.");
-      }
-
-      return makeEntitySearchResponse([], 0, page ?? 1);
-    });
-
-    renderPage();
-    await runGlobalInspectSearch("Marko");
-
-    expect(await screen.findByTestId("graph-renderer")).toBeInTheDocument();
-    expect(screen.queryByText(/Could not load live relationships for this entity/i)).not.toBeInTheDocument();
-    expect(mockApiClient.getEntityRelationships).toHaveBeenCalledWith(
-      "afa5a9d77ad726ee2c99d9e691db42b74300e805",
-      1,
-      1,
-      100
+    mockApiClient.updateProject.mockImplementation(
+      async (id: string, input: UpdateProjectRequest): Promise<ProjectDto> =>
+        makeProject({
+          id,
+          snapshot: {
+            entities: input.snapshot?.entities ?? []
+          }
+        })
     );
   });
 
-  it("does not auto-select relationships on node inspect", async () => {
-    const centerId = "afa5a9d77ad726ee2c99d9e691db42b74300e805";
-    mockApiClient.getEntityRelationships.mockResolvedValue(
-      makeEntitySearchResponse(
-        [
-          makeEntity({
-            id: "rel-1",
-            schema: "Ownership",
-            caption: "Ownership link",
-            properties: { owner: [centerId], asset: ["other-entity"] }
-          })
-        ],
-        1,
-        1
-      )
-    );
-    mockApiClient.getRelationship.mockRejectedValue(new Error("Request failed with status 500."));
-    mockApiClient.getRelationshipDocuments.mockRejectedValue(new Error("Request failed with status 500."));
-
+  it("sends write-safe snapshot payload and keeps dirty-state entity-only", async () => {
     renderPage();
     await runGlobalInspectSearch("Marko");
 
     expect(await screen.findByTestId("graph-renderer")).toBeInTheDocument();
-    expect(mockApiClient.getRelationship).not.toHaveBeenCalled();
-    expect(mockApiClient.getRelationshipDocuments).not.toHaveBeenCalled();
-    expect(screen.queryByText(/Relationship metadata is temporarily unavailable/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/Relationship source documents are temporarily unavailable/i)).not.toBeInTheDocument();
-  });
+    expect(await screen.findByRole("button", { name: "Save Snapshot *" })).toBeInTheDocument();
 
-  it("shows partial neighborhood info when a later relationships page fails", async () => {
-    const centerId = "afa5a9d77ad726ee2c99d9e691db42b74300e805";
-    mockApiClient.getEntityRelationships
-      .mockResolvedValueOnce(
-        makeEntitySearchResponse(
-          [
-            makeEntity({
-              id: "rel-1",
-              schema: "Ownership",
-              caption: "Ownership link",
-              properties: { owner: [centerId] }
-            })
-          ],
-          150,
-          1
-        )
-      )
-      .mockRejectedValueOnce(new Error("Request failed with status 500."));
+    fireEvent.click(screen.getByRole("button", { name: "Save Snapshot *" }));
 
-    renderPage();
-    await runGlobalInspectSearch("Marko");
-
-    expect(await screen.findByTestId("graph-renderer")).toBeInTheDocument();
-    expect(
-      await screen.findByText(
-        "Some relationships could not be loaded from backend. Showing partial neighborhood."
-      )
-    ).toBeInTheDocument();
-    expect(screen.queryByText(/Could not load live relationships for this entity/i)).not.toBeInTheDocument();
     await waitFor(() => {
-      expect(mockApiClient.getEntityRelationships).toHaveBeenNthCalledWith(
-        2,
-        centerId,
-        1,
-        2,
-        100
-      );
+      expect(mockApiClient.updateProject).toHaveBeenCalledTimes(1);
     });
+
+    const payload = vi.mocked(mockApiClient.updateProject).mock.calls[0][1];
+    expect(payload.snapshot).toBeDefined();
+    expect(payload.snapshot).not.toHaveProperty("viewport");
+    expect(payload.snapshot?.entities).toHaveLength(1);
+    expect(payload.snapshot?.entities[0]).not.toHaveProperty("first_seen");
+    expect(payload.snapshot?.entities[0]).not.toHaveProperty("last_changed");
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Save Snapshot" })).toBeInTheDocument();
+    });
+
+    await runGlobalInspectSearch("Marko");
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Save Snapshot" })).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("button", { name: "Save Snapshot *" })).not.toBeInTheDocument();
   });
 });

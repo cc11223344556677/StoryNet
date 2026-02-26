@@ -7,6 +7,7 @@ import {
   Button,
   Card,
   CardContent,
+  Chip,
   CircularProgress,
   Divider,
   FormControl,
@@ -28,14 +29,13 @@ import SearchIcon from "@mui/icons-material/Search";
 import SaveIcon from "@mui/icons-material/Save";
 import type {
   DocumentDto,
-  EntityNeighborhood,
   EntitySearchHit,
   FtMEntity,
   ProjectSnapshot
 } from "../../types/domain";
 import { apiClient } from "../../api/factory";
+import { sanitizeProjectSnapshotForWrite } from "../../api/projectWritePayload";
 import {
-  buildNeighborhood,
   getEntityLabel,
   isLikelyRelationshipSchema,
   mapEntityToSearchHit
@@ -46,6 +46,8 @@ import { graphRendererDefinitions } from "./renderers/registry";
 import { getInitialGraphRendererId, persistGraphRendererId } from "./renderers/rendererConfig";
 import type { GraphRendererId } from "./renderers/types";
 import { fetchEntityRelationshipsPaginated } from "./neighborhoodFetch";
+import { buildGraphFromSnapshot } from "./fullSnapshotGraph";
+import { GraphViewPreset, loadGraphViewPresets, saveGraphViewPresets } from "./viewPresets";
 import {
   collectRelationshipReferences,
   mergeSnapshot,
@@ -54,7 +56,6 @@ import {
 
 interface NeighborhoodQueryResult {
   centerId: string;
-  neighborhood: EntityNeighborhood;
   relationshipEntities: FtMEntity[];
   entitiesForSnapshot: FtMEntity[];
   partialRelationshipsLoaded: boolean;
@@ -73,6 +74,19 @@ function formatSourceDocumentLine(document: DocumentDto): string {
   return `${document.status} - ${document.type} - ${createdAt}`;
 }
 
+function buildDocumentInspectPath(documentId: string): string {
+  return `/documents?inspect=${encodeURIComponent(documentId)}`;
+}
+
+function parseRelationshipIdFromEdgeId(edgeId: string): string | null {
+  const separatorIndex = edgeId.indexOf(":");
+  if (separatorIndex <= 0) {
+    return null;
+  }
+
+  return edgeId.slice(0, separatorIndex);
+}
+
 export function ProjectGraphPage(): JSX.Element {
   const { projectId } = useParams<{ projectId: string }>();
   const queryClient = useQueryClient();
@@ -84,13 +98,17 @@ export function ProjectGraphPage(): JSX.Element {
   const [selectedEntityId, setSelectedEntityId] = useState<string | null>(null);
   const [entitySelectionVersion, setEntitySelectionVersion] = useState(0);
   const [selectedRelationshipId, setSelectedRelationshipId] = useState<string | null>(null);
-  const [displayNeighborhood, setDisplayNeighborhood] = useState<EntityNeighborhood | null>(null);
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [isSnapshotResultsCollapsed, setIsSnapshotResultsCollapsed] = useState(false);
   const [isGlobalResultsCollapsed, setIsGlobalResultsCollapsed] = useState(false);
   const [rendererId, setRendererId] = useState<GraphRendererId>(() => getInitialGraphRendererId());
   const [workingSnapshot, setWorkingSnapshot] = useState<ProjectSnapshot | null>(null);
   const [isSnapshotDirty, setIsSnapshotDirty] = useState(false);
   const [partialNeighborhoodMessage, setPartialNeighborhoodMessage] = useState<string | null>(null);
+  const [hiddenSchemas, setHiddenSchemas] = useState<string[]>([]);
+  const [viewPresets, setViewPresets] = useState<GraphViewPreset[]>([]);
+  const [selectedPresetId, setSelectedPresetId] = useState("");
+  const [presetNameInput, setPresetNameInput] = useState("");
 
   const projectQuery = useQuery({
     queryKey: ["project", projectId],
@@ -107,7 +125,7 @@ export function ProjectGraphPage(): JSX.Element {
     setSelectedEntityId(null);
     setEntitySelectionVersion(0);
     setSelectedRelationshipId(null);
-    setDisplayNeighborhood(null);
+    setSelectedEdgeId(null);
     setSnapshotSearchInput("");
     setSnapshotActiveQuery("");
     setGlobalSearchInput("");
@@ -116,6 +134,10 @@ export function ProjectGraphPage(): JSX.Element {
     setIsGlobalResultsCollapsed(false);
     setIsSnapshotDirty(false);
     setPartialNeighborhoodMessage(null);
+    setHiddenSchemas([]);
+    setViewPresets(loadGraphViewPresets(projectQuery.data.id));
+    setSelectedPresetId("");
+    setPresetNameInput("");
   }, [projectQuery.data?.id]);
 
   const snapshotEntityMap = useMemo(() => {
@@ -207,7 +229,6 @@ export function ProjectGraphPage(): JSX.Element {
         }
       }
 
-      const neighborhood = buildNeighborhood(centerEntity, relationshipEntities, entityById);
       const entitiesForSnapshot = new Map<string, FtMEntity>();
       entitiesForSnapshot.set(centerEntity.id, centerEntity);
 
@@ -215,8 +236,8 @@ export function ProjectGraphPage(): JSX.Element {
         entitiesForSnapshot.set(relationship.id, relationship);
       }
 
-      for (const node of neighborhood.neighborNodes) {
-        const entity = entityById.get(node.id);
+      for (const referencedId of referencedIds) {
+        const entity = entityById.get(referencedId);
         if (entity) {
           entitiesForSnapshot.set(entity.id, entity);
         }
@@ -224,7 +245,6 @@ export function ProjectGraphPage(): JSX.Element {
 
       return {
         centerId: centerEntity.id,
-        neighborhood,
         relationshipEntities,
         entitiesForSnapshot: [...entitiesForSnapshot.values()],
         partialRelationshipsLoaded: relationshipsResult.partialRelationshipsLoaded,
@@ -268,22 +288,16 @@ export function ProjectGraphPage(): JSX.Element {
     }
 
     setPartialNeighborhoodMessage(neighborhoodQuery.data.partialLoadMessage);
-    setDisplayNeighborhood(neighborhoodQuery.data.neighborhood);
 
-    let changed = false;
     setWorkingSnapshot((current) => {
       const base = current ?? projectQuery.data?.snapshot ?? createEmptySnapshot();
-      const merged = mergeSnapshot(base, neighborhoodQuery.data.entitiesForSnapshot, {
-        renderer: rendererId,
-        last_selected_entity: selectedEntityId
-      });
-      changed = merged.changed;
+      const merged = mergeSnapshot(base, neighborhoodQuery.data.entitiesForSnapshot);
+      if (merged.changed) {
+        setIsSnapshotDirty(true);
+      }
       return merged.snapshot;
     });
-    if (changed) {
-      setIsSnapshotDirty(true);
-    }
-  }, [neighborhoodQuery.data, selectedEntityId, projectQuery.data, rendererId]);
+  }, [neighborhoodQuery.data, selectedEntityId, projectQuery.data]);
 
   useEffect(() => {
     if (neighborhoodQuery.error instanceof Error) {
@@ -292,20 +306,25 @@ export function ProjectGraphPage(): JSX.Element {
   }, [neighborhoodQuery.error]);
 
   useEffect(() => {
-    const relationships = neighborhoodQuery.data?.relationshipEntities ?? [];
-    if (relationships.length === 0) {
-      setSelectedRelationshipId(null);
+    if (!selectedEntityId || !neighborhoodQuery.data) {
       return;
     }
 
-    const hasSelected = selectedRelationshipId
-      ? relationships.some((relationship) => relationship.id === selectedRelationshipId)
-      : false;
-
-    if (!hasSelected) {
-      setSelectedRelationshipId(relationships[0].id);
+    const relationships = neighborhoodQuery.data.relationshipEntities;
+    if (relationships.length === 0) {
+      if (selectedRelationshipId !== null) {
+        setSelectedRelationshipId(null);
+      }
+      return;
     }
-  }, [neighborhoodQuery.data, selectedRelationshipId]);
+
+    if (
+      selectedRelationshipId &&
+      !relationships.some((relationship) => relationship.id === selectedRelationshipId)
+    ) {
+      setSelectedRelationshipId(null);
+    }
+  }, [neighborhoodQuery.data, selectedEntityId, selectedRelationshipId]);
 
   const relationshipEntities = neighborhoodQuery.data?.relationshipEntities ?? [];
 
@@ -319,22 +338,22 @@ export function ProjectGraphPage(): JSX.Element {
     );
   }, [relationshipEntities, selectedRelationshipId]);
 
+  useEffect(() => {
+    if (!selectedPresetId) {
+      return;
+    }
+
+    const preset = viewPresets.find((item) => item.id === selectedPresetId);
+    if (preset) {
+      setPresetNameInput(preset.name);
+    }
+  }, [selectedPresetId, viewPresets]);
+
   const resolveEntityLabel = useCallback(
     (entityId: string, explicitLabel?: string): string => {
       const fromClick = explicitLabel?.trim();
       if (fromClick) {
         return fromClick;
-      }
-
-      if (displayNeighborhood) {
-        if (displayNeighborhood.centerNode.id === entityId) {
-          return displayNeighborhood.centerNode.label;
-        }
-
-        const neighbor = displayNeighborhood.neighborNodes.find((node) => node.id === entityId);
-        if (neighbor) {
-          return neighbor.label;
-        }
       }
 
       const fromSearch = scopedSearchHits.find((hit) => hit.entityId === entityId);
@@ -354,7 +373,7 @@ export function ProjectGraphPage(): JSX.Element {
 
       return "";
     },
-    [displayNeighborhood, globalSearchHits, scopedSearchHits, snapshotEntityMap]
+    [globalSearchHits, scopedSearchHits, snapshotEntityMap]
   );
 
   const selectEntity = useCallback(
@@ -364,7 +383,7 @@ export function ProjectGraphPage(): JSX.Element {
       setSelectedEntityId(entityId);
       setEntitySelectionVersion((current) => current + 1);
       setSelectedRelationshipId(null);
-      setDisplayNeighborhood(null);
+      setSelectedEdgeId(null);
       setPartialNeighborhoodMessage(null);
       if (fullLabel) {
         setSnapshotSearchInput(fullLabel);
@@ -404,44 +423,137 @@ export function ProjectGraphPage(): JSX.Element {
     setSelectedRelationshipId(relationshipId);
   };
 
+  const onSelectEdge = useCallback(
+    (edgeId: string): void => {
+      setSelectedEdgeId(edgeId);
+
+      const relationshipId = parseRelationshipIdFromEdgeId(edgeId);
+      setSelectedRelationshipId(relationshipId);
+    },
+    []
+  );
+
   const onAddGlobalEntity = (entityId: string, label: string): void => {
     setIsGlobalResultsCollapsed(true);
     selectEntity(entityId, label);
   };
 
   const onRemoveSnapshotEntity = (entityId: string): void => {
-    let changed = false;
-    let removedRelationshipIds: string[] = [];
+    const base = workingSnapshot ?? projectQuery.data?.snapshot ?? createEmptySnapshot();
+    const result = removeEntityFromSnapshot(base, entityId);
 
-    setWorkingSnapshot((current) => {
-      const base = current ?? projectQuery.data?.snapshot ?? createEmptySnapshot();
-      const result = removeEntityFromSnapshot(base, entityId);
-      changed = result.changed;
-      removedRelationshipIds = result.removedRelationshipIds;
-      return result.snapshot;
-    });
-
-    if (!changed) {
+    if (!result.changed) {
       return;
     }
 
+    setWorkingSnapshot(result.snapshot);
     setIsSnapshotDirty(true);
 
     if (selectedEntityId === entityId) {
       setSelectedEntityId(null);
-      setDisplayNeighborhood(null);
       setPartialNeighborhoodMessage(null);
     }
 
-    if (selectedRelationshipId && removedRelationshipIds.includes(selectedRelationshipId)) {
+    if (selectedRelationshipId && result.removedRelationshipIds.includes(selectedRelationshipId)) {
       setSelectedRelationshipId(null);
+      setSelectedEdgeId(null);
     }
+  };
+
+  const persistViewPresets = useCallback(
+    (next: GraphViewPreset[]): void => {
+      setViewPresets(next);
+      if (projectQuery.data?.id) {
+        saveGraphViewPresets(projectQuery.data.id, next);
+      }
+    },
+    [projectQuery.data?.id]
+  );
+
+  const toggleSchemaVisibility = (schema: string): void => {
+    setHiddenSchemas((current) => {
+      if (current.includes(schema)) {
+        return current.filter((value) => value !== schema);
+      }
+      return [...current, schema];
+    });
+  };
+
+  const showAllSchemas = (): void => {
+    setHiddenSchemas([]);
+  };
+
+  const hideAllSchemas = (): void => {
+    setHiddenSchemas(snapshotSchemas);
   };
 
   const handleRendererChange = (event: SelectChangeEvent<GraphRendererId>): void => {
     const nextRenderer = event.target.value as GraphRendererId;
     setRendererId(nextRenderer);
     persistGraphRendererId(nextRenderer);
+  };
+
+  const handlePresetSelectionChange = (event: SelectChangeEvent<string>): void => {
+    setSelectedPresetId(event.target.value);
+  };
+
+  const handleSavePreset = (): void => {
+    const name = presetNameInput.trim();
+    if (!name) {
+      return;
+    }
+
+    const preset: GraphViewPreset = {
+      id: `preset-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      name,
+      rendererId,
+      hiddenSchemas,
+      snapshotSearchInput,
+      globalSearchInput,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    const next = [...viewPresets, preset];
+    persistViewPresets(next);
+    setSelectedPresetId(preset.id);
+  };
+
+  const handleApplyPreset = (): void => {
+    const preset = viewPresets.find((item) => item.id === selectedPresetId);
+    if (!preset) {
+      return;
+    }
+
+    setRendererId(preset.rendererId);
+    persistGraphRendererId(preset.rendererId);
+    setHiddenSchemas(preset.hiddenSchemas);
+    setSnapshotSearchInput(preset.snapshotSearchInput ?? "");
+    setGlobalSearchInput(preset.globalSearchInput ?? "");
+  };
+
+  const handleRenamePreset = (): void => {
+    const name = presetNameInput.trim();
+    if (!selectedPresetId || !name) {
+      return;
+    }
+
+    const next = viewPresets.map((preset) =>
+      preset.id === selectedPresetId
+        ? { ...preset, name, updatedAt: new Date().toISOString() }
+        : preset
+    );
+    persistViewPresets(next);
+  };
+
+  const handleDeletePreset = (): void => {
+    if (!selectedPresetId) {
+      return;
+    }
+
+    const next = viewPresets.filter((preset) => preset.id !== selectedPresetId);
+    persistViewPresets(next);
+    setSelectedPresetId("");
   };
 
   const saveSnapshotMutation = useMutation({
@@ -455,16 +567,7 @@ export function ProjectGraphPage(): JSX.Element {
       return apiClient.updateProject(projectId, {
         name: projectQuery.data.name,
         description: projectQuery.data.description,
-        snapshot: {
-          entities: baseSnapshot.entities,
-          viewport: {
-            ...(baseSnapshot.viewport ?? {}),
-            renderer: rendererId,
-            last_selected_entity: selectedEntityId,
-            saved_at: new Date().toISOString(),
-            saved_from: "graph"
-          }
-        }
+        snapshot: sanitizeProjectSnapshotForWrite(baseSnapshot)
       });
     },
     onSuccess: async (updatedProject) => {
@@ -492,7 +595,57 @@ export function ProjectGraphPage(): JSX.Element {
     return [...entities].sort((a, b) => getEntityLabel(a).localeCompare(getEntityLabel(b)));
   }, [workingSnapshot, projectQuery.data]);
 
+  const snapshotSchemas = useMemo(() => {
+    const entities = workingSnapshot?.entities ?? projectQuery.data?.snapshot.entities ?? [];
+    const schemas = new Set<string>();
+    for (const entity of entities) {
+      schemas.add(entity.schema);
+    }
+    return [...schemas].sort((a, b) => a.localeCompare(b));
+  }, [workingSnapshot, projectQuery.data]);
+
+  const filteredSnapshotEntities = useMemo(() => {
+    const entities = workingSnapshot?.entities ?? projectQuery.data?.snapshot.entities ?? [];
+    if (hiddenSchemas.length === 0) {
+      return entities;
+    }
+
+    const hidden = new Set(hiddenSchemas);
+    return entities.filter((entity) => !hidden.has(entity.schema));
+  }, [hiddenSchemas, workingSnapshot, projectQuery.data]);
+
+  const snapshotGraph = useMemo(() => {
+    return buildGraphFromSnapshot(filteredSnapshotEntities);
+  }, [filteredSnapshotEntities]);
+
   const selectedEntityLabel = selectedEntityId ? resolveEntityLabel(selectedEntityId) : "";
+
+  useEffect(() => {
+    setHiddenSchemas((current) => current.filter((schema) => snapshotSchemas.includes(schema)));
+  }, [snapshotSchemas]);
+
+  useEffect(() => {
+    if (!selectedRelationshipId) {
+      if (selectedEdgeId !== null) {
+        setSelectedEdgeId(null);
+      }
+      return;
+    }
+
+    const matchingEdge = snapshotGraph.edges.find(
+      (edge) => edge.relationship_entity_id === selectedRelationshipId
+    );
+    if (!matchingEdge) {
+      if (selectedEdgeId !== null) {
+        setSelectedEdgeId(null);
+      }
+      return;
+    }
+
+    if (matchingEdge.id !== selectedEdgeId) {
+      setSelectedEdgeId(matchingEdge.id);
+    }
+  }, [selectedRelationshipId, selectedEdgeId, snapshotGraph.edges]);
 
   if (!projectId) {
     return <Alert severity="error">Project id is missing from route.</Alert>;
@@ -587,7 +740,7 @@ export function ProjectGraphPage(): JSX.Element {
 
           {saveSnapshotMutation.error instanceof Error && (
             <Alert sx={{ mt: 2 }} severity="error">
-              {saveSnapshotMutation.error.message}
+              Could not save project snapshot. Backend error: {saveSnapshotMutation.error.message}
             </Alert>
           )}
           {isSnapshotDirty && !saveSnapshotMutation.isPending && (
@@ -630,6 +783,87 @@ export function ProjectGraphPage(): JSX.Element {
               ))}
             </Select>
           </FormControl>
+        </Stack>
+
+        <Divider sx={{ mb: 2 }} />
+
+        <Stack spacing={1.5} sx={{ mb: 2 }}>
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2} alignItems={{ sm: "center" }}>
+            <Typography variant="subtitle2" color="text.secondary">
+              Schema Visibility
+            </Typography>
+            <Stack direction="row" spacing={1}>
+              <Button size="small" variant="outlined" onClick={showAllSchemas}>
+                Show All
+              </Button>
+              <Button size="small" variant="outlined" onClick={hideAllSchemas} disabled={snapshotSchemas.length === 0}>
+                Hide All
+              </Button>
+            </Stack>
+          </Stack>
+          <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+            {snapshotSchemas.map((schema) => {
+              const hidden = hiddenSchemas.includes(schema);
+              return (
+                <Chip
+                  key={schema}
+                  label={schema}
+                  color={hidden ? "default" : "primary"}
+                  variant={hidden ? "outlined" : "filled"}
+                  onClick={() => toggleSchemaVisibility(schema)}
+                />
+              );
+            })}
+            {snapshotSchemas.length === 0 && (
+              <Typography variant="body2" color="text.secondary">
+                No schemas found in this snapshot.
+              </Typography>
+            )}
+          </Stack>
+        </Stack>
+
+        <Divider sx={{ mb: 2 }} />
+
+        <Stack spacing={1.5} sx={{ mb: 2 }}>
+          <Typography variant="subtitle2" color="text.secondary">
+            View Presets (Local Only)
+          </Typography>
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2}>
+            <FormControl size="small" sx={{ minWidth: 220 }}>
+              <InputLabel id="preset-select-label">Preset</InputLabel>
+              <Select
+                labelId="preset-select-label"
+                label="Preset"
+                value={selectedPresetId}
+                onChange={handlePresetSelectionChange}
+              >
+                <MenuItem value="">None</MenuItem>
+                {viewPresets.map((preset) => (
+                  <MenuItem key={preset.id} value={preset.id}>
+                    {preset.name}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+            <TextField
+              size="small"
+              label="Preset name"
+              value={presetNameInput}
+              onChange={(event) => setPresetNameInput(event.target.value)}
+            />
+            <Button size="small" variant="outlined" onClick={handleSavePreset} disabled={presetNameInput.trim().length === 0}>
+              Save
+            </Button>
+            <Button size="small" variant="outlined" onClick={handleApplyPreset} disabled={!selectedPresetId}>
+              Apply
+            </Button>
+            <Button size="small" variant="outlined" onClick={handleRenamePreset} disabled={!selectedPresetId || presetNameInput.trim().length === 0}>
+              Rename
+            </Button>
+            <Button size="small" variant="outlined" color="error" onClick={handleDeletePreset} disabled={!selectedPresetId}>
+              Delete
+            </Button>
+          </Stack>
         </Stack>
 
         <form onSubmit={submitSnapshotSearch}>
@@ -822,18 +1056,20 @@ export function ProjectGraphPage(): JSX.Element {
         <Alert severity="info">{partialNeighborhoodMessage}</Alert>
       )}
 
-      {displayNeighborhood ? (
+      {snapshotGraph.nodes.length > 0 ? (
         <Box className="graph-panel">
           <GraphRendererHost
             rendererId={rendererId}
-            neighborhood={displayNeighborhood}
+            graph={snapshotGraph}
             selectedNodeId={selectedEntityId}
+            selectedEdgeId={selectedEdgeId}
             onNodeClick={handleNodeClick}
+            onEdgeClick={onSelectEdge}
           />
         </Box>
       ) : (
         <Alert severity="info">
-          Select an entity from snapshot or global search to render its live relationship neighborhood.
+          This project snapshot has no graph entities yet. Use global search or document seeding to add entities.
         </Alert>
       )}
 
@@ -841,10 +1077,64 @@ export function ProjectGraphPage(): JSX.Element {
         <CardContent>
           <Stack spacing={2}>
             <Typography variant="h6" sx={{ fontWeight: 700 }}>
-              Entity Source Documents
+              Source Documents
             </Typography>
 
-            {selectedEntityId ? (
+            {selectedRelationshipId ? (
+              <>
+                <Typography variant="body2" color="text.secondary">
+                  Selected relationship: {selectedRelationshipId}
+                </Typography>
+
+                {relationshipDocumentsQuery.isLoading ? (
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <CircularProgress size={18} />
+                    <Typography>Loading source documents for relationship...</Typography>
+                  </Stack>
+                ) : relationshipDocumentsQuery.error instanceof Error ? (
+                  <Alert severity="error">
+                    Backend unavailable for this operation: {relationshipDocumentsQuery.error.message}
+                  </Alert>
+                ) : (
+                  <>
+                    <Typography variant="body2" color="text.secondary">
+                      Total source documents: {relationshipDocumentsQuery.data?.total ?? 0}
+                    </Typography>
+                    <List dense>
+                      {(relationshipDocumentsQuery.data?.results ?? []).map((document) => (
+                        <ListItem key={document.id} disableGutters>
+                          <Stack
+                            direction={{ xs: "column", sm: "row" }}
+                            spacing={1}
+                            alignItems={{ xs: "stretch", sm: "center" }}
+                            justifyContent="space-between"
+                            sx={{ width: "100%" }}
+                          >
+                            <ListItemText
+                              primary={document.filename}
+                              secondary={formatSourceDocumentLine(document)}
+                            />
+                            <Button
+                              size="small"
+                              variant="outlined"
+                              component={RouterLink}
+                              to={buildDocumentInspectPath(document.id)}
+                            >
+                              Inspect in Documents
+                            </Button>
+                          </Stack>
+                        </ListItem>
+                      ))}
+                      {(relationshipDocumentsQuery.data?.results.length ?? 0) === 0 && (
+                        <ListItem disableGutters>
+                          <ListItemText primary="No source documents returned for this relationship." />
+                        </ListItem>
+                      )}
+                    </List>
+                  </>
+                )}
+              </>
+            ) : selectedEntityId ? (
               <>
                 <Typography variant="body2" color="text.secondary">
                   Selected entity: {selectedEntityLabel || selectedEntityId}
@@ -867,10 +1157,26 @@ export function ProjectGraphPage(): JSX.Element {
                     <List dense>
                       {(entityDocumentsQuery.data?.results ?? []).map((document) => (
                         <ListItem key={document.id} disableGutters>
-                          <ListItemText
-                            primary={document.filename}
-                            secondary={formatSourceDocumentLine(document)}
-                          />
+                          <Stack
+                            direction={{ xs: "column", sm: "row" }}
+                            spacing={1}
+                            alignItems={{ xs: "stretch", sm: "center" }}
+                            justifyContent="space-between"
+                            sx={{ width: "100%" }}
+                          >
+                            <ListItemText
+                              primary={document.filename}
+                              secondary={formatSourceDocumentLine(document)}
+                            />
+                            <Button
+                              size="small"
+                              variant="outlined"
+                              component={RouterLink}
+                              to={buildDocumentInspectPath(document.id)}
+                            >
+                              Inspect in Documents
+                            </Button>
+                          </Stack>
                         </ListItem>
                       ))}
                       {(entityDocumentsQuery.data?.results.length ?? 0) === 0 && (
@@ -884,7 +1190,7 @@ export function ProjectGraphPage(): JSX.Element {
               </>
             ) : (
               <Alert severity="info">
-                Select an entity node to load source documents from backend.
+                Select an entity node or relationship edge to load source documents from backend.
               </Alert>
             )}
           </Stack>
@@ -898,30 +1204,38 @@ export function ProjectGraphPage(): JSX.Element {
               Relationship Source Documents
             </Typography>
 
-            {relationshipEntities.length === 0 ? (
+            {!selectedEntityId && !selectedRelationshipId ? (
               <Alert severity="info">
-                No relationship entities are loaded for the current neighborhood.
+                Select an entity node or relationship edge to load relationship details and source documents from backend.
               </Alert>
             ) : (
               <>
-                <Typography variant="body2" color="text.secondary">
-                  Select a relationship entity to view its metadata and source documents.
-                </Typography>
+                {relationshipEntities.length > 0 ? (
+                  <>
+                    <Typography variant="body2" color="text.secondary">
+                      Select a relationship entity to view its metadata and source documents.
+                    </Typography>
 
-                <List dense sx={{ border: "1px solid #e1e7f3", borderRadius: 1, maxHeight: 220, overflowY: "auto" }}>
-                  {relationshipEntities.map((relationship) => (
-                    <ListItemButton
-                      key={relationship.id}
-                      selected={relationship.id === selectedRelationshipId}
-                      onClick={() => onSelectRelationship(relationship.id)}
-                    >
-                      <ListItemText
-                        primary={getEntityLabel(relationship)}
-                        secondary={`${relationship.schema} - ${relationship.id}`}
-                      />
-                    </ListItemButton>
-                  ))}
-                </List>
+                    <List dense sx={{ border: "1px solid #e1e7f3", borderRadius: 1, maxHeight: 220, overflowY: "auto" }}>
+                      {relationshipEntities.map((relationship) => (
+                        <ListItemButton
+                          key={relationship.id}
+                          selected={relationship.id === selectedRelationshipId}
+                          onClick={() => onSelectRelationship(relationship.id)}
+                        >
+                          <ListItemText
+                            primary={getEntityLabel(relationship)}
+                            secondary={`${relationship.schema} - ${relationship.id}`}
+                          />
+                        </ListItemButton>
+                      ))}
+                    </List>
+                  </>
+                ) : (
+                  <Alert severity="info">
+                    No relationship entities are loaded for the selected entity neighborhood yet.
+                  </Alert>
+                )}
 
                 {relationshipDetailQuery.isLoading && selectedRelationshipId && (
                   <Stack direction="row" spacing={1} alignItems="center">
@@ -930,9 +1244,9 @@ export function ProjectGraphPage(): JSX.Element {
                   </Stack>
                 )}
 
-                {relationshipDetailQuery.error instanceof Error && (
-                  <Alert severity="error">
-                    Backend unavailable for this operation: {relationshipDetailQuery.error.message}
+                {selectedRelationshipId && relationshipDetailQuery.error instanceof Error && (
+                  <Alert severity="info">
+                    Relationship metadata is temporarily unavailable from backend: {relationshipDetailQuery.error.message}
                   </Alert>
                 )}
 
@@ -950,47 +1264,9 @@ export function ProjectGraphPage(): JSX.Element {
                   </Stack>
                 )}
 
-                {selectedRelationshipId && relationshipDocumentsQuery.isLoading && (
-                  <Stack direction="row" spacing={1} alignItems="center">
-                    <CircularProgress size={18} />
-                    <Typography>Loading relationship source documents...</Typography>
-                  </Stack>
-                )}
-
-                {relationshipDocumentsQuery.error instanceof Error && (
-                  <Alert severity="error">
-                    Backend unavailable for this operation: {relationshipDocumentsQuery.error.message}
-                  </Alert>
-                )}
-
-                {selectedRelationshipId &&
-                  !relationshipDocumentsQuery.isLoading &&
-                  !(relationshipDocumentsQuery.error instanceof Error) && (
-                  <>
-                    <Typography variant="body2" color="text.secondary">
-                      Total source documents: {relationshipDocumentsQuery.data?.total ?? 0}
-                    </Typography>
-                    <List dense>
-                      {(relationshipDocumentsQuery.data?.results ?? []).map((document) => (
-                        <ListItem key={document.id} disableGutters>
-                          <ListItemText
-                            primary={document.filename}
-                            secondary={formatSourceDocumentLine(document)}
-                          />
-                        </ListItem>
-                      ))}
-                      {(relationshipDocumentsQuery.data?.results.length ?? 0) === 0 && (
-                        <ListItem disableGutters>
-                          <ListItemText primary="No source documents returned for this relationship." />
-                        </ListItem>
-                      )}
-                    </List>
-                  </>
-                )}
-
                 {!selectedRelationshipId && (
                   <Alert severity="info">
-                    Select a relationship entity to request backend source documents.
+                    Select a relationship edge or relationship list item to request backend source documents.
                   </Alert>
                 )}
 

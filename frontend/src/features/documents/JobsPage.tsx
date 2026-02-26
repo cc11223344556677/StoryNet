@@ -22,12 +22,14 @@ import type { SelectChangeEvent } from "@mui/material/Select";
 import type { DocumentStatus } from "../../types/domain";
 import { apiClient } from "../../api/factory";
 import { formatApiDate } from "../../lib/date";
+import { JobInspectorPanel } from "./JobInspectorPanel";
 
 const PAGE_SIZE = 50;
 
 export function JobsPage(): JSX.Element {
   const [statusFilter, setStatusFilter] = useState<DocumentStatus | "">("");
   const [page, setPage] = useState(1);
+  const [inspectedJobId, setInspectedJobId] = useState<string | null>(null);
 
   const jobsQuery = useQuery({
     queryKey: ["jobs", statusFilter, page],
@@ -107,6 +109,7 @@ export function JobsPage(): JSX.Element {
                 <TableCell>Message</TableCell>
                 <TableCell>Created</TableCell>
                 <TableCell>Updated</TableCell>
+                <TableCell>Actions</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
@@ -119,11 +122,16 @@ export function JobsPage(): JSX.Element {
                   <TableCell>{job.message ?? "n/a"}</TableCell>
                   <TableCell>{formatApiDate(job.created_at)}</TableCell>
                   <TableCell>{formatApiDate(job.updated_at)}</TableCell>
+                  <TableCell>
+                    <Button size="small" variant="outlined" onClick={() => setInspectedJobId(job.job_id)}>
+                      Inspect
+                    </Button>
+                  </TableCell>
                 </TableRow>
               ))}
               {rows.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={7}>
+                  <TableCell colSpan={8}>
                     <Typography color="text.secondary">No jobs returned for the selected filters.</Typography>
                   </TableCell>
                 </TableRow>
@@ -146,6 +154,12 @@ export function JobsPage(): JSX.Element {
           </Button>
         </Stack>
       </Stack>
+
+      <JobInspectorPanel
+        open={Boolean(inspectedJobId)}
+        jobId={inspectedJobId}
+        onClose={() => setInspectedJobId(null)}
+      />
     </Stack>
   );
 }

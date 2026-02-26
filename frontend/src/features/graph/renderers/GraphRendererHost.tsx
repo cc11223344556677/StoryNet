@@ -41,9 +41,11 @@ class RendererErrorBoundary extends React.Component<RendererErrorBoundaryProps, 
 
 export function GraphRendererHost({
   rendererId,
-  neighborhood,
+  graph,
   selectedNodeId,
-  onNodeClick
+  selectedEdgeId,
+  onNodeClick,
+  onEdgeClick
 }: GraphRendererHostProps): JSX.Element {
   const definition = getGraphRendererDefinition(rendererId);
 
@@ -60,9 +62,11 @@ export function GraphRendererHost({
         }
       >
         <RendererComponent
-          neighborhood={neighborhood}
+          graph={graph}
           selectedNodeId={selectedNodeId}
+          selectedEdgeId={selectedEdgeId}
           onNodeClick={onNodeClick}
+          onEdgeClick={onEdgeClick}
         />
       </Suspense>
     </RendererErrorBoundary>

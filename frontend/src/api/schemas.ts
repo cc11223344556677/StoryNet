@@ -40,7 +40,7 @@ export const provenanceEntrySchema = z.object({
   page_number: z.number().int().nullable().optional()
 });
 
-export const ftmEntitySchema = z
+const ftmEntityBaseSchema = z
   .object({
     id: z.string().min(1),
     schema: z.string().min(1),
@@ -54,6 +54,27 @@ export const ftmEntitySchema = z
     last_changed: responseDateTimeStringSchema.optional()
   })
   .passthrough();
+
+export const ftmEntitySchema = z.preprocess(
+  (value) => {
+    if (!value || typeof value !== "object") {
+      return value;
+    }
+
+    const raw = value as Record<string, unknown>;
+    const schemaCandidate =
+      (typeof raw.schema === "string" && raw.schema.trim()) ||
+      (typeof raw._schema === "string" && raw._schema.trim()) ||
+      (typeof raw.type === "string" && raw.type.trim()) ||
+      "Unknown";
+
+    return {
+      ...raw,
+      schema: schemaCandidate
+    };
+  },
+  ftmEntityBaseSchema
+);
 
 export const projectSnapshotSchema = z.object({
   entities: z.array(ftmEntitySchema),

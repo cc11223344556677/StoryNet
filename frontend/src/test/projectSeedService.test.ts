@@ -157,6 +157,7 @@ describe("projectSeedService", () => {
     expect(created.id).toBe("project-1");
     expect(api.createProject).toHaveBeenCalledTimes(1);
     expect(vi.mocked(api.createProject).mock.calls[0][0].snapshot.entities).toHaveLength(2);
+    expect(vi.mocked(api.createProject).mock.calls[0][0].snapshot).not.toHaveProperty("viewport");
   });
 
   it("adds document entities into existing project snapshot with dedupe", async () => {
@@ -209,6 +210,7 @@ describe("projectSeedService", () => {
     expect(updated.id).toBe("project-1");
     const updatePayload = vi.mocked(api.updateProject).mock.calls[0][1];
     expect(updatePayload.snapshot?.entities.map((entity) => entity.id).sort()).toEqual(["e0", "e1", "e2"]);
+    expect(updatePayload.snapshot).not.toHaveProperty("viewport");
   });
 
   it("mergeEntitiesById keeps unique entities by id", () => {

@@ -57,7 +57,7 @@ export interface FtMEntity {
 
 export interface ProjectSnapshot {
   entities: FtMEntity[];
-  viewport: Record<string, unknown>;
+  viewport?: Record<string, unknown>;
 }
 
 export interface ProjectDto {
@@ -170,6 +170,7 @@ export interface GraphEdge {
   source: string;
   target: string;
   relation: string;
+  relationship_entity_id?: string;
 }
 
 export interface EntityNeighborhood {

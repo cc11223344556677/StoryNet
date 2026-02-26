@@ -50,4 +50,37 @@ describe("projectSchema compatibility parsing", () => {
     expect(() => projectSchema.parse(missingId)).toThrow();
     expect(() => projectSchema.parse(missingSnapshotEntities)).toThrow();
   });
+
+  it("recovers legacy entities when schema is missing but type exists", () => {
+    const payload = makeBaseProjectPayload();
+    payload.snapshot = {
+      entities: [
+        {
+          id: "entity-1",
+          type: "Person",
+          properties: {}
+        }
+      ]
+    };
+
+    const parsed = projectSchema.parse(payload);
+
+    expect(parsed.snapshot.entities[0].schema).toBe("Person");
+  });
+
+  it("falls back to Unknown schema when legacy entity schema fields are absent", () => {
+    const payload = makeBaseProjectPayload();
+    payload.snapshot = {
+      entities: [
+        {
+          id: "entity-1",
+          properties: {}
+        }
+      ]
+    };
+
+    const parsed = projectSchema.parse(payload);
+
+    expect(parsed.snapshot.entities[0].schema).toBe("Unknown");
+  });
 });

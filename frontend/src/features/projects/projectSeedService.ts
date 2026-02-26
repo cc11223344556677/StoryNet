@@ -112,17 +112,6 @@ export async function fetchDocumentEntitiesStrict(
   };
 }
 
-function mergeSeedViewport(
-  baseViewport: Record<string, unknown> | undefined,
-  documentId: string
-): Record<string, unknown> {
-  return {
-    ...(baseViewport ?? {}),
-    last_seeded_document_id: documentId,
-    last_seeded_at: new Date().toISOString()
-  };
-}
-
 export async function createProjectFromDocument(
   apiClient: ApiClient,
   input: CreateProjectFromDocumentInput
@@ -133,8 +122,7 @@ export async function createProjectFromDocument(
     name: input.name.trim(),
     description: normalizeProjectDescription(input.description),
     snapshot: {
-      entities: seeded.entities,
-      viewport: mergeSeedViewport({}, input.documentId)
+      entities: seeded.entities
     }
   });
 }
@@ -150,8 +138,7 @@ export async function addDocumentEntitiesToProject(
     name: project.name,
     description: project.description,
     snapshot: {
-      entities: mergeEntitiesById(project.snapshot.entities, seeded.entities),
-      viewport: mergeSeedViewport(project.snapshot.viewport, input.documentId)
+      entities: mergeEntitiesById(project.snapshot.entities, seeded.entities)
     }
   });
 }

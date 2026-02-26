@@ -53,6 +53,7 @@ import {
   UnauthorizedError,
   ValidationError
 } from "./errors";
+import { sanitizeProjectSnapshotForWrite } from "./projectWritePayload";
 
 interface RequestOptions extends RequestInit {
   auth?: boolean;
@@ -107,6 +108,66 @@ function normalizeApiError(status: number, payload: unknown): StoryNetApiError {
   if (status === 401) return new UnauthorizedError();
   if (status === 403) return new ForbiddenError();
   if (status === 404) return new NotFoundError("Resource");
+  if (status === 400) {
+    if (payload && typeof payload === "object") {
+      const candidate = payload as Record<string, unknown>;
+
+      if (typeof candidate.message === "string" && candidate.message.length > 0) {
+        return new StoryNetApiError("BAD_REQUEST", candidate.message, status, payload);
+      }
+
+      if (typeof candidate.detail === "string" && candidate.detail.length > 0) {
+        return new StoryNetApiError(
+          "BAD_REQUEST",
+          `Request validation failed: ${candidate.detail}`,
+          status,
+          payload
+        );
+      }
+
+      if (Array.isArray(candidate.detail) && candidate.detail.length > 0) {
+        const details = candidate.detail
+          .map((entry) => {
+            if (typeof entry === "string") {
+              return entry;
+            }
+
+            if (!entry || typeof entry !== "object") {
+              return null;
+            }
+
+            const detailItem = entry as Record<string, unknown>;
+            if (typeof detailItem.msg === "string" && detailItem.msg.length > 0) {
+              return detailItem.msg;
+            }
+            if (typeof detailItem.message === "string" && detailItem.message.length > 0) {
+              return detailItem.message;
+            }
+
+            const location = Array.isArray(detailItem.loc)
+              ? detailItem.loc
+              : Array.isArray(detailItem.path)
+                ? detailItem.path
+                : null;
+            if (location) {
+              return `Invalid field ${location.map((value) => String(value)).join(".")}`;
+            }
+
+            return null;
+          })
+          .filter((value): value is string => Boolean(value));
+
+        if (details.length > 0) {
+          return new StoryNetApiError(
+            "BAD_REQUEST",
+            `Request validation failed: ${details.join("; ")}`,
+            status,
+            payload
+          );
+        }
+      }
+    }
+  }
   if (status === 422) return new ValidationError("Request validation failed.");
 
   return new StoryNetApiError("HTTP_ERROR", `Request failed with status ${status}.`, status, payload);
@@ -282,7 +343,11 @@ export class RestStoryNetApiClient implements ApiClient {
   }
 
   async createProject(input: CreateProjectRequest): Promise<ProjectDto> {
-    const payload = createProjectRequestSchema.parse(input);
+    const parsed = createProjectRequestSchema.parse(input);
+    const payload = {
+      ...parsed,
+      snapshot: sanitizeProjectSnapshotForWrite(parsed.snapshot)
+    };
 
     return this.request(
       "/projects",
@@ -296,7 +361,13 @@ export class RestStoryNetApiClient implements ApiClient {
   }
 
   async updateProject(id: string, input: UpdateProjectRequest): Promise<ProjectDto> {
-    const payload = updateProjectRequestSchema.parse(input);
+    const parsed = updateProjectRequestSchema.parse(input);
+    const payload = parsed.snapshot
+      ? {
+          ...parsed,
+          snapshot: sanitizeProjectSnapshotForWrite(parsed.snapshot)
+        }
+      : parsed;
 
     return this.request(
       `/projects/${encodeURIComponent(id)}`,

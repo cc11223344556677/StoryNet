@@ -6,6 +6,7 @@ import {
   Button,
   Card,
   CardContent,
+  Checkbox,
   Chip,
   CircularProgress,
   Dialog,
@@ -32,7 +33,7 @@ import {
 } from "@mui/material";
 import type { SelectChangeEvent } from "@mui/material/Select";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import type { DocumentStatus, DocumentType, JobStatus } from "../../types/domain";
 import { apiClient } from "../../api/factory";
 import { StoryNetApiError } from "../../api/errors";
@@ -43,6 +44,11 @@ import {
   createProjectFromDocument,
   ProjectSeedError
 } from "../projects/projectSeedService";
+import {
+  addDocumentsToProject,
+  createProjectFromDocuments,
+  ProjectSeedBatchError
+} from "../projects/projectSeedBatchService";
 
 const TERMINAL_JOB_STATES: ReadonlySet<DocumentStatus> = new Set(["completed", "failed"]);
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -58,6 +64,13 @@ type EntityPanelState =
   | "details_temporarily_unavailable";
 
 function formatProjectSeedError(error: unknown): string {
+  if (error instanceof ProjectSeedBatchError) {
+    const details = error.failures
+      .map((failure) => `${failure.documentId}: ${failure.message}`)
+      .join(" | ");
+    return `${error.message} ${details}`.trim();
+  }
+
   if (error instanceof ProjectSeedError) {
     return error.message;
   }
@@ -133,6 +146,7 @@ function validateFile(file: File): string | null {
 export function DocumentsPage(): JSX.Element {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const [statusFilter, setStatusFilter] = useState<DocumentStatus | "">("");
   const [typeFilter, setTypeFilter] = useState<DocumentType | "">("");
@@ -145,9 +159,10 @@ export function DocumentsPage(): JSX.Element {
   const [lastJob, setLastJob] = useState<JobStatus | null>(null);
   const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null);
   const [entitySchemaFilter, setEntitySchemaFilter] = useState("");
+  const [selectedSeedDocumentIds, setSelectedSeedDocumentIds] = useState<Set<string>>(new Set());
   const [createSeedDialogOpen, setCreateSeedDialogOpen] = useState(false);
   const [addSeedDialogOpen, setAddSeedDialogOpen] = useState(false);
-  const [seedDocumentId, setSeedDocumentId] = useState<string | null>(null);
+  const [seedDocumentIds, setSeedDocumentIds] = useState<string[]>([]);
   const [newProjectName, setNewProjectName] = useState("");
   const [newProjectDescription, setNewProjectDescription] = useState("");
   const [targetProjectId, setTargetProjectId] = useState("");
@@ -168,6 +183,8 @@ export function DocumentsPage(): JSX.Element {
     queryFn: () => apiClient.getDocument(selectedDocumentId!),
     enabled: Boolean(selectedDocumentId)
   });
+
+  const inspectDocumentIdFromQuery = searchParams.get("inspect");
 
   const selectedDocumentStatus = selectedDocumentQuery.data?.status;
   const canFetchDocumentEntities = selectedDocumentStatus === "completed";
@@ -240,17 +257,14 @@ export function DocumentsPage(): JSX.Element {
   }, [jobQuery.data, queryClient]);
 
   useEffect(() => {
-    if (!selectedDocumentId) {
+    if (!inspectDocumentIdFromQuery) {
       return;
     }
 
-    const stillPresent = (documentsQuery.data?.results ?? []).some(
-      (document) => document.id === selectedDocumentId
-    );
-    if (!stillPresent) {
-      setSelectedDocumentId(null);
+    if (selectedDocumentId !== inspectDocumentIdFromQuery) {
+      setSelectedDocumentId(inspectDocumentIdFromQuery);
     }
-  }, [documentsQuery.data, selectedDocumentId]);
+  }, [inspectDocumentIdFromQuery, selectedDocumentId]);
 
   const uploadMutation = useMutation({
     mutationFn: async (): Promise<JobStatus> => {
@@ -349,32 +363,51 @@ export function DocumentsPage(): JSX.Element {
   });
 
   const createProjectSeedMutation = useMutation({
-    mutationFn: async (params: { documentId: string; name: string; description: string }) =>
-      createProjectFromDocument(apiClient, {
-        documentId: params.documentId,
+    mutationFn: async (params: { documentIds: string[]; name: string; description: string }) => {
+      if (params.documentIds.length === 1) {
+        return createProjectFromDocument(apiClient, {
+          documentId: params.documentIds[0],
+          name: params.name,
+          description: params.description
+        });
+      }
+
+      return createProjectFromDocuments(apiClient, {
+        documentIds: params.documentIds,
         name: params.name,
         description: params.description
-      }),
+      });
+    },
     onSuccess: async (project) => {
       setCreateSeedDialogOpen(false);
-      setSeedDocumentId(null);
+      setSeedDocumentIds([]);
       setNewProjectName("");
       setNewProjectDescription("");
+      setSelectedSeedDocumentIds(new Set());
       await queryClient.invalidateQueries({ queryKey: ["projects"] });
       navigate(`/projects/${project.id}/graph`);
     }
   });
 
   const addProjectSeedMutation = useMutation({
-    mutationFn: async (params: { documentId: string; projectId: string }) =>
-      addDocumentEntitiesToProject(apiClient, {
-        documentId: params.documentId,
+    mutationFn: async (params: { documentIds: string[]; projectId: string }) => {
+      if (params.documentIds.length === 1) {
+        return addDocumentEntitiesToProject(apiClient, {
+          documentId: params.documentIds[0],
+          projectId: params.projectId
+        });
+      }
+
+      return addDocumentsToProject(apiClient, {
+        documentIds: params.documentIds,
         projectId: params.projectId
-      }),
+      });
+    },
     onSuccess: async (project) => {
       setAddSeedDialogOpen(false);
-      setSeedDocumentId(null);
+      setSeedDocumentIds([]);
       setTargetProjectId("");
+      setSelectedSeedDocumentIds(new Set());
       await queryClient.invalidateQueries({ queryKey: ["projects"] });
       await queryClient.invalidateQueries({ queryKey: ["project", project.id] });
       navigate(`/projects/${project.id}/graph`);
@@ -403,6 +436,43 @@ export function DocumentsPage(): JSX.Element {
   const rows = useMemo(() => {
     return (documentsQuery.data?.results ?? []).map((document) => mapDocumentToVM(document));
   }, [documentsQuery.data]);
+
+  const selectableSeedDocumentIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const document of documentsQuery.data?.results ?? []) {
+      if (document.status === "completed") {
+        ids.add(document.id);
+      }
+    }
+    return ids;
+  }, [documentsQuery.data]);
+
+  const selectedSeedCount = useMemo(() => {
+    let count = 0;
+    for (const id of selectedSeedDocumentIds) {
+      if (selectableSeedDocumentIds.has(id)) {
+        count += 1;
+      }
+    }
+    return count;
+  }, [selectedSeedDocumentIds, selectableSeedDocumentIds]);
+
+  useEffect(() => {
+    setSelectedSeedDocumentIds((current) => {
+      const filtered = new Set<string>();
+      for (const id of current) {
+        if (selectableSeedDocumentIds.has(id)) {
+          filtered.add(id);
+        }
+      }
+
+      if (filtered.size === current.size) {
+        return current;
+      }
+
+      return filtered;
+    });
+  }, [selectableSeedDocumentIds]);
 
   const selectedDocumentFromList = useMemo(() => {
     if (!selectedDocumentId) {
@@ -442,6 +512,23 @@ export function DocumentsPage(): JSX.Element {
 
   const onSelectDocument = (documentId: string): void => {
     setSelectedDocumentId(documentId);
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      next.set("inspect", documentId);
+      return next;
+    });
+  };
+
+  const onToggleSeedSelection = (documentId: string, checked: boolean): void => {
+    setSelectedSeedDocumentIds((current) => {
+      const next = new Set(current);
+      if (checked) {
+        next.add(documentId);
+      } else {
+        next.delete(documentId);
+      }
+      return next;
+    });
   };
 
   const onSetPublic = (documentId: string): void => {
@@ -460,7 +547,7 @@ export function DocumentsPage(): JSX.Element {
 
   const openCreateProjectSeedDialog = (documentId: string, documentName: string): void => {
     createProjectSeedMutation.reset();
-    setSeedDocumentId(documentId);
+    setSeedDocumentIds([documentId]);
     setNewProjectName(`${documentName} Graph`);
     setNewProjectDescription("");
     setCreateSeedDialogOpen(true);
@@ -468,41 +555,66 @@ export function DocumentsPage(): JSX.Element {
 
   const openAddToProjectSeedDialog = (documentId: string): void => {
     addProjectSeedMutation.reset();
-    setSeedDocumentId(documentId);
+    setSeedDocumentIds([documentId]);
+    setTargetProjectId("");
+    setAddSeedDialogOpen(true);
+  };
+
+  const openBulkCreateProjectSeedDialog = (): void => {
+    const selectedIds = [...selectedSeedDocumentIds];
+    if (selectedIds.length === 0) {
+      return;
+    }
+
+    createProjectSeedMutation.reset();
+    setSeedDocumentIds(selectedIds);
+    setNewProjectName(`Merged ${selectedIds.length} Documents Graph`);
+    setNewProjectDescription("");
+    setCreateSeedDialogOpen(true);
+  };
+
+  const openBulkAddToProjectSeedDialog = (): void => {
+    const selectedIds = [...selectedSeedDocumentIds];
+    if (selectedIds.length === 0) {
+      return;
+    }
+
+    addProjectSeedMutation.reset();
+    setSeedDocumentIds(selectedIds);
     setTargetProjectId("");
     setAddSeedDialogOpen(true);
   };
 
   const closeCreateSeedDialog = (): void => {
     setCreateSeedDialogOpen(false);
-    setSeedDocumentId(null);
+    setSeedDocumentIds([]);
   };
 
   const closeAddSeedDialog = (): void => {
     setAddSeedDialogOpen(false);
-    setSeedDocumentId(null);
+    setSeedDocumentIds([]);
     setTargetProjectId("");
   };
 
   const submitCreateProjectSeed = (): void => {
-    if (!seedDocumentId || newProjectName.trim().length === 0) {
+    if (seedDocumentIds.length === 0 || newProjectName.trim().length === 0) {
       return;
     }
 
     createProjectSeedMutation.mutate({
-      documentId: seedDocumentId,
+      documentIds: seedDocumentIds,
       name: newProjectName,
       description: newProjectDescription
     });
   };
 
   const submitAddToProjectSeed = (): void => {
-    if (!seedDocumentId || targetProjectId.length === 0) {
+    if (seedDocumentIds.length === 0 || targetProjectId.length === 0) {
       return;
     }
 
     addProjectSeedMutation.mutate({
-      documentId: seedDocumentId,
+      documentIds: seedDocumentIds,
       projectId: targetProjectId
     });
   };
@@ -665,6 +777,30 @@ export function DocumentsPage(): JSX.Element {
           Flow: Upload document, wait for completed status, then seed or create a project graph.
         </Alert>
 
+        <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2} alignItems={{ sm: "center" }} sx={{ mb: 2 }}>
+          <Typography variant="body2" color="text.secondary">
+            Selected completed documents: {selectedSeedCount}
+          </Typography>
+          <Stack direction="row" spacing={1}>
+            <Button
+              size="small"
+              variant="outlined"
+              onClick={openBulkCreateProjectSeedDialog}
+              disabled={selectedSeedCount === 0 || createProjectSeedMutation.isPending || addProjectSeedMutation.isPending}
+            >
+              Create Project from Selected
+            </Button>
+            <Button
+              size="small"
+              variant="outlined"
+              onClick={openBulkAddToProjectSeedDialog}
+              disabled={selectedSeedCount === 0 || createProjectSeedMutation.isPending || addProjectSeedMutation.isPending}
+            >
+              Add Selected to Project
+            </Button>
+          </Stack>
+        </Stack>
+
         {setPublicMutation.error instanceof Error && (
           <Alert sx={{ mb: 2 }} severity="error">
             Backend could not update document visibility: {setPublicMutation.error.message}
@@ -697,6 +833,7 @@ export function DocumentsPage(): JSX.Element {
           <Table size="small">
             <TableHead>
               <TableRow>
+                <TableCell padding="checkbox">Select</TableCell>
                 <TableCell>Filename</TableCell>
                 <TableCell>Type</TableCell>
                 <TableCell>Status</TableCell>
@@ -709,6 +846,13 @@ export function DocumentsPage(): JSX.Element {
             <TableBody>
               {rows.map((document) => (
                 <TableRow key={document.id} selected={selectedDocumentId === document.id}>
+                  <TableCell padding="checkbox">
+                    <Checkbox
+                      checked={selectedSeedDocumentIds.has(document.id)}
+                      disabled={document.status !== "completed"}
+                      onChange={(event) => onToggleSeedSelection(document.id, event.target.checked)}
+                    />
+                  </TableCell>
                   <TableCell>{document.fileName}</TableCell>
                   <TableCell>{document.type}</TableCell>
                   <TableCell>{document.status}</TableCell>
@@ -764,7 +908,7 @@ export function DocumentsPage(): JSX.Element {
               ))}
               {rows.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={7}>
+                  <TableCell colSpan={8}>
                     <Typography color="text.secondary">No documents found for the selected filters.</Typography>
                   </TableCell>
                 </TableRow>
