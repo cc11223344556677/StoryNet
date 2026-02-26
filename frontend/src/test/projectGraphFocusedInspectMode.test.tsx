@@ -41,13 +41,28 @@ vi.mock("../api/factory", () => ({
 vi.mock("../features/graph/renderers/GraphRendererHost", () => ({
   GraphRendererHost: ({
     graph,
-    selectedNodeId
+    selectedNodeId,
+    onNodeClick
   }: {
     graph: { nodes: Array<{ id: string }>; edges: Array<{ id: string }> } | null;
     selectedNodeId: string | null;
+    onNodeClick: (nodeId: string, nodeLabel: string) => void;
   }) => (
-    <div data-testid="graph-renderer">
-      nodes:{graph?.nodes.length ?? 0}; edges:{graph?.edges.length ?? 0}; selected:{selectedNodeId ?? "none"}
+    <div>
+      <div data-testid="graph-renderer">
+        nodes:{graph?.nodes.length ?? 0}; edges:{graph?.edges.length ?? 0}; selected:{selectedNodeId ?? "none"}
+      </div>
+      <button
+        type="button"
+        onClick={() => {
+          const node = graph?.nodes[graph.nodes.length - 1];
+          if (node) {
+            onNodeClick(node.id, node.id);
+          }
+        }}
+      >
+        select-last-node
+      </button>
     </div>
   )
 }));
@@ -64,7 +79,7 @@ function makeEntity(overrides: Partial<FtMEntity> = {}): FtMEntity {
   };
 }
 
-function makeSnapshotProject(): ProjectDto {
+function makeProject(): ProjectDto {
   return {
     id: "project-1",
     name: "Project One",
@@ -85,21 +100,6 @@ function makeSnapshotProject(): ProjectDto {
           }
         })
       ],
-      viewport: {}
-    },
-    created_at: "2026-02-26 00:00:00",
-    updated_at: "2026-02-26 00:00:00"
-  };
-}
-
-function makeEmptyProject(): ProjectDto {
-  return {
-    id: "project-1",
-    name: "Project One",
-    description: "desc",
-    owner_id: "user-1",
-    snapshot: {
-      entities: [],
       viewport: {}
     },
     created_at: "2026-02-26 00:00:00",
@@ -149,54 +149,55 @@ function renderPage(): void {
   );
 }
 
-describe("project graph full snapshot view", () => {
+describe("project graph focused inspect mode", () => {
   afterEach(() => {
     cleanup();
   });
 
   beforeEach(() => {
     vi.clearAllMocks();
+
+    mockApiClient.getProject.mockResolvedValue(makeProject());
+    mockApiClient.searchEntities.mockResolvedValue(
+      makeEntitySearchResponse([makeEntity({ id: "person-1", caption: "Person One" })])
+    );
+    mockApiClient.getEntity.mockImplementation(async (id: string) =>
+      makeEntity({ id, caption: id === "person-1" ? "Person One" : id === "person-2" ? "Person Two" : "Person Three" })
+    );
+    mockApiClient.getEntityRelationships.mockImplementation(async (id: string) => {
+      if (id === "person-1") {
+        return makeEntitySearchResponse([
+          makeEntity({
+            id: "rel-1",
+            schema: "Ownership",
+            caption: "Ownership",
+            properties: {
+              owner: ["person-1"],
+              asset: ["person-2"]
+            }
+          })
+        ]);
+      }
+
+      return makeEntitySearchResponse([]);
+    });
     mockApiClient.getEntityDocuments.mockResolvedValue(makeDocumentList());
-    mockApiClient.getRelationshipDocuments.mockResolvedValue(makeDocumentList());
     mockApiClient.getRelationship.mockResolvedValue(
-      makeEntity({ id: "rel-1", schema: "Ownership", caption: "Ownership", properties: {} })
+      makeEntity({
+        id: "rel-1",
+        schema: "Ownership",
+        caption: "Ownership",
+        properties: {}
+      })
     );
+    mockApiClient.getRelationshipDocuments.mockResolvedValue(makeDocumentList());
   });
 
-  it("renders full snapshot graph on initial load without selecting an entity", async () => {
-    mockApiClient.getProject.mockResolvedValue(makeSnapshotProject());
-
+  it("enters focused inspect mode and returns to full snapshot with manual toggle", async () => {
     renderPage();
 
     expect(await screen.findByTestId("graph-renderer")).toHaveTextContent("nodes:3; edges:1; selected:none");
-    expect(
-      screen.queryByText("This project snapshot has no graph entities yet. Use global search or document seeding to add entities.")
-    ).not.toBeInTheDocument();
-  });
-
-  it("keeps full graph visible while inspect updates selected entity details", async () => {
-    const inspectedEntity = makeEntity({ id: "person-1", caption: "Person One" });
-
-    mockApiClient.getProject.mockResolvedValue(makeSnapshotProject());
-    mockApiClient.searchEntities.mockResolvedValue(makeEntitySearchResponse([inspectedEntity]));
-    mockApiClient.getEntity.mockResolvedValue(inspectedEntity);
-    mockApiClient.getEntityRelationships.mockResolvedValue(
-      makeEntitySearchResponse([
-        makeEntity({
-          id: "rel-1",
-          schema: "Ownership",
-          caption: "Ownership",
-          properties: {
-            owner: ["person-1"],
-            asset: ["person-2"]
-          }
-        })
-      ])
-    );
-
-    renderPage();
-
-    expect(await screen.findByTestId("graph-renderer")).toHaveTextContent("nodes:3; edges:1; selected:none");
+    expect(screen.getByText("Full Snapshot View")).toBeInTheDocument();
 
     fireEvent.change(await screen.findByLabelText("Search all visible backend entities"), {
       target: { value: "Person One" }
@@ -207,20 +208,20 @@ describe("project graph full snapshot view", () => {
     await waitFor(() => {
       expect(screen.getByTestId("graph-renderer")).toHaveTextContent("nodes:2; edges:1; selected:person-1");
     });
-    expect(await screen.findByText("Focused Inspect View")).toBeInTheDocument();
-    expect(await screen.findByText(/Selected entity: Person One/)).toBeInTheDocument();
-  });
+    expect(screen.getByText("Focused Inspect View")).toBeInTheDocument();
 
-  it("shows a clear empty state when snapshot has no graph entities", async () => {
-    mockApiClient.getProject.mockResolvedValue(makeEmptyProject());
+    fireEvent.click(screen.getByRole("button", { name: "Back to Full Snapshot" }));
 
-    renderPage();
+    await waitFor(() => {
+      expect(screen.getByTestId("graph-renderer")).toHaveTextContent("nodes:3; edges:1; selected:person-1");
+    });
+    expect(screen.getByText("Full Snapshot View")).toBeInTheDocument();
 
-    expect(
-      await screen.findByText(
-        "This project snapshot has no graph entities yet. Use global search or document seeding to add entities."
-      )
-    ).toBeInTheDocument();
-    expect(screen.queryByTestId("graph-renderer")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "select-last-node" }));
+    await waitFor(() => {
+      expect(screen.getByTestId("graph-renderer")).toHaveTextContent("nodes:1; edges:0; selected:person-3");
+    });
+    expect(screen.getByText("Focused Inspect View")).toBeInTheDocument();
+    expect(await screen.findByText("No direct neighbors found; showing selected entity only.")).toBeInTheDocument();
   });
 });

@@ -1,16 +1,16 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, SyntheticEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link as RouterLink, useParams } from "react-router-dom";
 import {
   Alert,
   Box,
   Button,
-  Card,
-  CardContent,
+  Checkbox,
   Chip,
   CircularProgress,
   Divider,
   FormControl,
+  IconButton,
   InputLabel,
   List,
   ListItem,
@@ -20,11 +20,21 @@ import {
   Paper,
   Select,
   Stack,
+  Tab,
+  Tabs,
   TextField,
+  Tooltip,
   Typography
 } from "@mui/material";
 import type { SelectChangeEvent } from "@mui/material/Select";
+import { useTheme } from "@mui/material/styles";
+import useMediaQuery from "@mui/material/useMediaQuery";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
+import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
+import ChevronRightIcon from "@mui/icons-material/ChevronRight";
+import DashboardCustomizeIcon from "@mui/icons-material/DashboardCustomize";
+import InsightsIcon from "@mui/icons-material/Insights";
+import LayersIcon from "@mui/icons-material/Layers";
 import SearchIcon from "@mui/icons-material/Search";
 import SaveIcon from "@mui/icons-material/Save";
 import type {
@@ -44,15 +54,25 @@ import { formatApiDate } from "../../lib/date";
 import { GraphRendererHost } from "./renderers/GraphRendererHost";
 import { graphRendererDefinitions } from "./renderers/registry";
 import { getInitialGraphRendererId, persistGraphRendererId } from "./renderers/rendererConfig";
-import type { GraphRendererId } from "./renderers/types";
+import type { GraphRenderModel, GraphRendererId } from "./renderers/types";
 import { fetchEntityRelationshipsPaginated } from "./neighborhoodFetch";
 import { buildGraphFromSnapshot } from "./fullSnapshotGraph";
+import { GraphWorkspaceLayout } from "./GraphWorkspaceLayout";
 import { GraphViewPreset, loadGraphViewPresets, saveGraphViewPresets } from "./viewPresets";
+import {
+  GraphWorkspaceLayoutState,
+  GraphWorkspaceLeftTab,
+  GraphWorkspaceRightTab,
+  getDefaultGraphWorkspaceLayoutState,
+  loadGraphWorkspaceLayoutState,
+  saveGraphWorkspaceLayoutState
+} from "./workspaceLayout";
 import {
   collectRelationshipReferences,
   mergeSnapshot,
   removeEntityFromSnapshot
 } from "./snapshotUtils";
+import { fetchDocumentEntitiesStrict, mergeEntitiesById } from "../projects/projectSeedService";
 
 interface NeighborhoodQueryResult {
   centerId: string;
@@ -62,11 +82,20 @@ interface NeighborhoodQueryResult {
   partialLoadMessage: string | null;
 }
 
+type GraphViewMode = "full_snapshot" | "focused_inspect";
+
 function createEmptySnapshot(): ProjectSnapshot {
   return {
     entities: [],
     viewport: {}
   };
+}
+
+function isWriteEquivalentSnapshot(a: ProjectSnapshot, b: ProjectSnapshot): boolean {
+  return (
+    JSON.stringify(sanitizeProjectSnapshotForWrite(a)) ===
+    JSON.stringify(sanitizeProjectSnapshotForWrite(b))
+  );
 }
 
 function formatSourceDocumentLine(document: DocumentDto): string {
@@ -87,9 +116,19 @@ function parseRelationshipIdFromEdgeId(edgeId: string): string | null {
   return edgeId.slice(0, separatorIndex);
 }
 
+function formatSeedError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return "Could not load document entities for snapshot seeding.";
+}
+
 export function ProjectGraphPage(): JSX.Element {
   const { projectId } = useParams<{ projectId: string }>();
   const queryClient = useQueryClient();
+  const theme = useTheme();
+  const isMobile = useMediaQuery(theme.breakpoints.down("md"));
 
   const [snapshotSearchInput, setSnapshotSearchInput] = useState("");
   const [snapshotActiveQuery, setSnapshotActiveQuery] = useState("");
@@ -109,6 +148,13 @@ export function ProjectGraphPage(): JSX.Element {
   const [viewPresets, setViewPresets] = useState<GraphViewPreset[]>([]);
   const [selectedPresetId, setSelectedPresetId] = useState("");
   const [presetNameInput, setPresetNameInput] = useState("");
+  const [workspaceLayout, setWorkspaceLayout] = useState<GraphWorkspaceLayoutState>(() =>
+    getDefaultGraphWorkspaceLayoutState()
+  );
+  const [mobileLeftOpen, setMobileLeftOpen] = useState(false);
+  const [mobileRightOpen, setMobileRightOpen] = useState(false);
+  const [selectedSeedDocumentIds, setSelectedSeedDocumentIds] = useState<Set<string>>(new Set());
+  const [graphViewMode, setGraphViewMode] = useState<GraphViewMode>("full_snapshot");
 
   const projectQuery = useQuery({
     queryKey: ["project", projectId],
@@ -138,7 +184,18 @@ export function ProjectGraphPage(): JSX.Element {
     setViewPresets(loadGraphViewPresets(projectQuery.data.id));
     setSelectedPresetId("");
     setPresetNameInput("");
+    setWorkspaceLayout(loadGraphWorkspaceLayoutState(projectQuery.data.id));
+    setSelectedSeedDocumentIds(new Set());
+    setGraphViewMode("full_snapshot");
   }, [projectQuery.data?.id]);
+
+  useEffect(() => {
+    if (!projectQuery.data?.id) {
+      return;
+    }
+
+    saveGraphWorkspaceLayoutState(projectQuery.data.id, workspaceLayout);
+  }, [projectQuery.data?.id, workspaceLayout]);
 
   const snapshotEntityMap = useMemo(() => {
     const map = new Map<string, FtMEntity>();
@@ -198,6 +255,41 @@ export function ProjectGraphPage(): JSX.Element {
   const globalSearchHits = useMemo<EntitySearchHit[]>(() => {
     return (globalSearchQuery.data?.results ?? []).map((entity) => mapEntityToSearchHit(entity));
   }, [globalSearchQuery.data]);
+
+  const completedDocumentsQuery = useQuery({
+    queryKey: ["graph-seed-documents", projectId],
+    queryFn: () =>
+      apiClient.listMyDocuments({
+        status: "completed",
+        page: 1,
+        pageSize: 100
+      }),
+    enabled: Boolean(projectId)
+  });
+
+  const seedDocuments = completedDocumentsQuery.data?.results ?? [];
+
+  useEffect(() => {
+    setSelectedSeedDocumentIds((current) => {
+      if (current.size === 0) {
+        return current;
+      }
+
+      const allowed = new Set(seedDocuments.map((document) => document.id));
+      const filtered = new Set<string>();
+      for (const id of current) {
+        if (allowed.has(id)) {
+          filtered.add(id);
+        }
+      }
+
+      if (filtered.size === current.size) {
+        return current;
+      }
+
+      return filtered;
+    });
+  }, [seedDocuments]);
 
   const loadEntityNeighborhood = useCallback(
     async (targetEntityId: string): Promise<NeighborhoodQueryResult> => {
@@ -292,7 +384,7 @@ export function ProjectGraphPage(): JSX.Element {
     setWorkingSnapshot((current) => {
       const base = current ?? projectQuery.data?.snapshot ?? createEmptySnapshot();
       const merged = mergeSnapshot(base, neighborhoodQuery.data.entitiesForSnapshot);
-      if (merged.changed) {
+      if (merged.changed && !isWriteEquivalentSnapshot(base, merged.snapshot)) {
         setIsSnapshotDirty(true);
       }
       return merged.snapshot;
@@ -396,6 +488,18 @@ export function ProjectGraphPage(): JSX.Element {
     [resolveEntityLabel]
   );
 
+  const enterFocusedInspect = useCallback(
+    (entityId: string, explicitLabel?: string): void => {
+      setGraphViewMode("focused_inspect");
+      selectEntity(entityId, explicitLabel);
+    },
+    [selectEntity]
+  );
+
+  const exitFocusedInspect = useCallback((): void => {
+    setGraphViewMode("full_snapshot");
+  }, []);
+
   const submitSnapshotSearch = (event: FormEvent): void => {
     event.preventDefault();
 
@@ -414,9 +518,9 @@ export function ProjectGraphPage(): JSX.Element {
 
   const handleNodeClick = useCallback(
     (nodeId: string, nodeLabel: string): void => {
-      selectEntity(nodeId, nodeLabel);
+      enterFocusedInspect(nodeId, nodeLabel);
     },
-    [selectEntity]
+    [enterFocusedInspect]
   );
 
   const onSelectRelationship = (relationshipId: string): void => {
@@ -452,12 +556,73 @@ export function ProjectGraphPage(): JSX.Element {
     if (selectedEntityId === entityId) {
       setSelectedEntityId(null);
       setPartialNeighborhoodMessage(null);
+      setGraphViewMode("full_snapshot");
     }
 
     if (selectedRelationshipId && result.removedRelationshipIds.includes(selectedRelationshipId)) {
       setSelectedRelationshipId(null);
       setSelectedEdgeId(null);
     }
+  };
+
+  const seedDocumentsMutation = useMutation({
+    mutationFn: async (documentIds: string[]) => {
+      let aggregatedEntities: FtMEntity[] = [];
+
+      for (const documentId of documentIds) {
+        const result = await fetchDocumentEntitiesStrict(apiClient, documentId);
+        aggregatedEntities = mergeEntitiesById(aggregatedEntities, result.entities);
+      }
+
+      return aggregatedEntities;
+    },
+    onSuccess: (entities) => {
+      setWorkingSnapshot((current) => {
+        const base = current ?? projectQuery.data?.snapshot ?? createEmptySnapshot();
+        const merged = mergeSnapshot(base, entities);
+
+        if (merged.changed) {
+          setIsSnapshotDirty(true);
+        }
+
+        return merged.snapshot;
+      });
+
+      setSelectedSeedDocumentIds(new Set());
+    }
+  });
+
+  const selectedSeedCount = selectedSeedDocumentIds.size;
+  const areAllSeedDocumentsSelected =
+    seedDocuments.length > 0 && selectedSeedCount === seedDocuments.length;
+
+  const onToggleSeedDocument = (documentId: string, checked: boolean): void => {
+    setSelectedSeedDocumentIds((current) => {
+      const next = new Set(current);
+      if (checked) {
+        next.add(documentId);
+      } else {
+        next.delete(documentId);
+      }
+      return next;
+    });
+  };
+
+  const onToggleAllSeedDocuments = (checked: boolean): void => {
+    if (!checked) {
+      setSelectedSeedDocumentIds(new Set());
+      return;
+    }
+
+    setSelectedSeedDocumentIds(new Set(seedDocuments.map((document) => document.id)));
+  };
+
+  const onAddSelectedDocumentsToSnapshot = (): void => {
+    if (selectedSeedDocumentIds.size === 0 || seedDocumentsMutation.isPending) {
+      return;
+    }
+
+    seedDocumentsMutation.mutate([...selectedSeedDocumentIds]);
   };
 
   const persistViewPresets = useCallback(
@@ -618,7 +783,94 @@ export function ProjectGraphPage(): JSX.Element {
     return buildGraphFromSnapshot(filteredSnapshotEntities);
   }, [filteredSnapshotEntities]);
 
+  const focusedSnapshotEntities = useMemo(() => {
+    if (graphViewMode !== "focused_inspect" || !selectedEntityId || !neighborhoodQuery.data) {
+      return null;
+    }
+
+    if (neighborhoodQuery.data.centerId !== selectedEntityId) {
+      return null;
+    }
+
+    if (hiddenSchemas.length === 0) {
+      return neighborhoodQuery.data.entitiesForSnapshot;
+    }
+
+    const hidden = new Set(hiddenSchemas);
+    return neighborhoodQuery.data.entitiesForSnapshot.filter((entity) => !hidden.has(entity.schema));
+  }, [graphViewMode, hiddenSchemas, neighborhoodQuery.data, selectedEntityId]);
+
+  const focusedSnapshotGraph = useMemo(() => {
+    if (!focusedSnapshotEntities) {
+      return null;
+    }
+
+    return buildGraphFromSnapshot(focusedSnapshotEntities);
+  }, [focusedSnapshotEntities]);
+
+  const isFocusedInspectActive = graphViewMode === "focused_inspect";
+
   const selectedEntityLabel = selectedEntityId ? resolveEntityLabel(selectedEntityId) : "";
+  const selectedEntityType = useMemo(() => {
+    if (!selectedEntityId) {
+      return "Entity";
+    }
+
+    const fromSnapshot = snapshotEntityMap.get(selectedEntityId);
+    if (fromSnapshot) {
+      return fromSnapshot.schema;
+    }
+
+    const fromScopedSearch = scopedSearchHits.find((hit) => hit.entityId === selectedEntityId);
+    if (fromScopedSearch) {
+      return fromScopedSearch.type;
+    }
+
+    const fromGlobalSearch = globalSearchHits.find((hit) => hit.entityId === selectedEntityId);
+    if (fromGlobalSearch) {
+      return fromGlobalSearch.type;
+    }
+
+    return "Entity";
+  }, [globalSearchHits, scopedSearchHits, selectedEntityId, snapshotEntityMap]);
+
+  const selectedNodeOnlyGraph = useMemo<GraphRenderModel | null>(() => {
+    if (graphViewMode !== "focused_inspect" || !selectedEntityId) {
+      return null;
+    }
+
+    return {
+      nodes: [
+        {
+          id: selectedEntityId,
+          label: selectedEntityLabel || selectedEntityId,
+          type: selectedEntityType
+        }
+      ],
+      edges: []
+    };
+  }, [graphViewMode, selectedEntityId, selectedEntityLabel, selectedEntityType]);
+
+  const displayedGraph = useMemo<GraphRenderModel>(() => {
+    if (graphViewMode !== "focused_inspect") {
+      return snapshotGraph;
+    }
+
+    if (focusedSnapshotGraph) {
+      return focusedSnapshotGraph;
+    }
+
+    return selectedNodeOnlyGraph ?? { nodes: [], edges: [] };
+  }, [focusedSnapshotGraph, graphViewMode, selectedNodeOnlyGraph, snapshotGraph]);
+
+  const neighborhoodData = neighborhoodQuery.data;
+  const showNoDirectNeighborsMessage =
+    isFocusedInspectActive &&
+    Boolean(selectedEntityId) &&
+    !neighborhoodQuery.isFetching &&
+    !(neighborhoodQuery.error instanceof Error) &&
+    neighborhoodData?.centerId === selectedEntityId &&
+    (neighborhoodData?.relationshipEntities.length ?? -1) === 0;
 
   useEffect(() => {
     setHiddenSchemas((current) => current.filter((schema) => snapshotSchemas.includes(schema)));
@@ -632,7 +884,7 @@ export function ProjectGraphPage(): JSX.Element {
       return;
     }
 
-    const matchingEdge = snapshotGraph.edges.find(
+    const matchingEdge = displayedGraph.edges.find(
       (edge) => edge.relationship_entity_id === selectedRelationshipId
     );
     if (!matchingEdge) {
@@ -645,7 +897,714 @@ export function ProjectGraphPage(): JSX.Element {
     if (matchingEdge.id !== selectedEdgeId) {
       setSelectedEdgeId(matchingEdge.id);
     }
-  }, [selectedRelationshipId, selectedEdgeId, snapshotGraph.edges]);
+  }, [displayedGraph.edges, selectedRelationshipId, selectedEdgeId]);
+
+  const onLeftTabChange = (_event: SyntheticEvent, value: string): void => {
+    setWorkspaceLayout((current) => ({
+      ...current,
+      leftTab: value as GraphWorkspaceLeftTab
+    }));
+  };
+
+  const onRightTabChange = (_event: SyntheticEvent, value: string): void => {
+    setWorkspaceLayout((current) => ({
+      ...current,
+      rightTab: value as GraphWorkspaceRightTab
+    }));
+  };
+
+  const collapseLeftPanel = (): void => {
+    setWorkspaceLayout((current) => ({ ...current, leftCollapsed: true }));
+  };
+
+  const expandLeftPanel = (): void => {
+    setWorkspaceLayout((current) => ({ ...current, leftCollapsed: false }));
+  };
+
+  const collapseRightPanel = (): void => {
+    setWorkspaceLayout((current) => ({ ...current, rightCollapsed: true }));
+  };
+
+  const expandRightPanel = (): void => {
+    setWorkspaceLayout((current) => ({ ...current, rightCollapsed: false }));
+  };
+
+  const selectedEntityFromSnapshot = selectedEntityId
+    ? snapshotEntityMap.get(selectedEntityId)
+    : undefined;
+
+  const searchTab = (
+    <Stack spacing={1.5}>
+      <FormControl size="small" fullWidth>
+        <InputLabel id="renderer-select-label">Renderer</InputLabel>
+        <Select
+          labelId="renderer-select-label"
+          label="Renderer"
+          value={rendererId}
+          onChange={handleRendererChange}
+        >
+          {graphRendererDefinitions.map((renderer) => (
+            <MenuItem key={renderer.id} value={renderer.id}>
+              {renderer.label}
+            </MenuItem>
+          ))}
+        </Select>
+      </FormControl>
+
+      <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+        <FormControl size="small" sx={{ minWidth: 180 }}>
+          <InputLabel id="preset-select-label">Preset</InputLabel>
+          <Select
+            labelId="preset-select-label"
+            label="Preset"
+            value={selectedPresetId}
+            onChange={handlePresetSelectionChange}
+          >
+            <MenuItem value="">None</MenuItem>
+            {viewPresets.map((preset) => (
+              <MenuItem key={preset.id} value={preset.id}>
+                {preset.name}
+              </MenuItem>
+            ))}
+          </Select>
+        </FormControl>
+        <TextField
+          size="small"
+          label="Preset name"
+          value={presetNameInput}
+          onChange={(event) => setPresetNameInput(event.target.value)}
+        />
+      </Stack>
+      <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+        <Button size="small" variant="outlined" onClick={handleSavePreset} disabled={presetNameInput.trim().length === 0}>
+          Save
+        </Button>
+        <Button size="small" variant="outlined" onClick={handleApplyPreset} disabled={!selectedPresetId}>
+          Apply
+        </Button>
+        <Button size="small" variant="outlined" onClick={handleRenamePreset} disabled={!selectedPresetId || presetNameInput.trim().length === 0}>
+          Rename
+        </Button>
+        <Button size="small" variant="outlined" color="error" onClick={handleDeletePreset} disabled={!selectedPresetId}>
+          Delete
+        </Button>
+      </Stack>
+
+      <Divider />
+
+      <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+        <Button size="small" variant="outlined" onClick={showAllSchemas}>
+          Show All
+        </Button>
+        <Button size="small" variant="outlined" onClick={hideAllSchemas} disabled={snapshotSchemas.length === 0}>
+          Hide All
+        </Button>
+        {snapshotSchemas.map((schema) => {
+          const hidden = hiddenSchemas.includes(schema);
+          return (
+            <Chip
+              key={schema}
+              label={schema}
+              color={hidden ? "default" : "primary"}
+              variant={hidden ? "outlined" : "filled"}
+              onClick={() => toggleSchemaVisibility(schema)}
+            />
+          );
+        })}
+      </Stack>
+
+      <Divider />
+
+      <form onSubmit={submitSnapshotSearch}>
+        <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+          <TextField
+            fullWidth
+            label="Search within snapshot"
+            placeholder="e.g. Eleanor Grant"
+            value={snapshotSearchInput}
+            onChange={(event) => setSnapshotSearchInput(event.target.value)}
+          />
+          <Button
+            type="submit"
+            variant="contained"
+            startIcon={<SearchIcon />}
+            disabled={snapshotSearchInput.trim().length === 0}
+          >
+            Search Snapshot
+          </Button>
+        </Stack>
+      </form>
+
+      {snapshotSearchQuery.isFetching && (
+        <Stack direction="row" spacing={1} alignItems="center">
+          <CircularProgress size={18} />
+          <Typography variant="body2">Searching snapshot entities...</Typography>
+        </Stack>
+      )}
+      {snapshotSearchQuery.error instanceof Error && (
+        <Alert severity="error">{snapshotSearchQuery.error.message}</Alert>
+      )}
+      {!isSnapshotResultsCollapsed && snapshotActiveQuery && (
+        <>
+          {scopedSearchHits.length === 0 ? (
+            <Alert severity="info">No snapshot entity matches for "{snapshotActiveQuery}".</Alert>
+          ) : (
+            <List dense sx={{ border: "1px solid #e1e7f3", borderRadius: 1, maxHeight: 220, overflowY: "auto" }}>
+              {scopedSearchHits.map((hit) => (
+                <ListItemButton
+                  key={hit.entityId}
+                  selected={selectedEntityId === hit.entityId}
+                  onClick={() => enterFocusedInspect(hit.entityId, hit.label)}
+                >
+                  <ListItemText primary={hit.label} secondary={hit.type} />
+                </ListItemButton>
+              ))}
+            </List>
+          )}
+        </>
+      )}
+
+      <Divider />
+
+      <form onSubmit={submitGlobalSearch}>
+        <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+          <TextField
+            fullWidth
+            label="Search all visible backend entities"
+            placeholder="e.g. Acme Corp"
+            value={globalSearchInput}
+            onChange={(event) => setGlobalSearchInput(event.target.value)}
+          />
+          <Button
+            type="submit"
+            variant="outlined"
+            startIcon={<SearchIcon />}
+            disabled={globalSearchInput.trim().length === 0}
+          >
+            Search Global
+          </Button>
+        </Stack>
+      </form>
+
+      {globalSearchQuery.isFetching && (
+        <Stack direction="row" spacing={1} alignItems="center">
+          <CircularProgress size={18} />
+          <Typography variant="body2">Searching backend entities...</Typography>
+        </Stack>
+      )}
+      {globalSearchQuery.error instanceof Error && (
+        <Alert severity="error">{globalSearchQuery.error.message}</Alert>
+      )}
+      {!isGlobalResultsCollapsed && globalActiveQuery && (
+        <>
+          {globalSearchHits.length === 0 ? (
+            <Alert severity="info">No global entities match "{globalActiveQuery}".</Alert>
+          ) : (
+            <List dense sx={{ border: "1px solid #e1e7f3", borderRadius: 1, maxHeight: 300, overflowY: "auto" }}>
+              {globalSearchHits.map((hit) => (
+                <ListItem key={hit.entityId} disableGutters>
+                  <Stack spacing={1} sx={{ width: "100%" }}>
+                    <ListItemText primary={hit.label} secondary={`${hit.type} - ${hit.entityId}`} />
+                    <Stack direction="row" spacing={1}>
+                      <Button size="small" variant="outlined" onClick={() => enterFocusedInspect(hit.entityId, hit.label)}>
+                        Inspect
+                      </Button>
+                      <Button size="small" variant="contained" onClick={() => onAddGlobalEntity(hit.entityId, hit.label)}>
+                        Add to Snapshot
+                      </Button>
+                    </Stack>
+                  </Stack>
+                </ListItem>
+              ))}
+            </List>
+          )}
+        </>
+      )}
+    </Stack>
+  );
+
+  const seedTab = (
+    <Stack spacing={1.5}>
+      <Typography variant="body2" color="text.secondary">
+        Select completed documents to import their entities into this snapshot.
+      </Typography>
+
+      {completedDocumentsQuery.isLoading ? (
+        <Stack direction="row" spacing={1} alignItems="center">
+          <CircularProgress size={18} />
+          <Typography>Loading completed documents...</Typography>
+        </Stack>
+      ) : completedDocumentsQuery.error instanceof Error ? (
+        <Alert severity="error">{completedDocumentsQuery.error.message}</Alert>
+      ) : (
+        <>
+          <Stack direction="row" justifyContent="space-between" alignItems="center">
+            <Typography variant="body2" color="text.secondary">
+              Completed documents: {seedDocuments.length}
+            </Typography>
+            <Button size="small" onClick={() => onToggleAllSeedDocuments(!areAllSeedDocumentsSelected)}>
+              {areAllSeedDocumentsSelected ? "Clear All" : "Select All"}
+            </Button>
+          </Stack>
+
+          <List dense sx={{ border: "1px solid #e1e7f3", borderRadius: 1, maxHeight: 280, overflowY: "auto" }}>
+            {seedDocuments.map((document) => {
+              const checked = selectedSeedDocumentIds.has(document.id);
+              return (
+                <ListItem key={document.id} disablePadding>
+                  <ListItemButton onClick={() => onToggleSeedDocument(document.id, !checked)}>
+                    <Checkbox checked={checked} />
+                    <ListItemText
+                      primary={document.filename}
+                      secondary={`entities: ${document.entity_count ?? 0}`}
+                    />
+                  </ListItemButton>
+                </ListItem>
+              );
+            })}
+            {seedDocuments.length === 0 && (
+              <ListItem>
+                <ListItemText primary="No completed documents available for seeding yet." />
+              </ListItem>
+            )}
+          </List>
+
+          <Button
+            variant="contained"
+            onClick={onAddSelectedDocumentsToSnapshot}
+            disabled={selectedSeedCount === 0 || seedDocumentsMutation.isPending}
+          >
+            {seedDocumentsMutation.isPending ? "Importing..." : "Add Selected to Snapshot"}
+          </Button>
+          {seedDocumentsMutation.error && (
+            <Alert severity="error">{formatSeedError(seedDocumentsMutation.error)}</Alert>
+          )}
+        </>
+      )}
+    </Stack>
+  );
+
+  const snapshotTab = (
+    <Stack spacing={1.5}>
+      <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+        <Chip color="primary" label={`Entities ${snapshotStats.total}`} />
+        <Chip color="default" label={`Nodes ${snapshotStats.nodeCount}`} />
+        <Chip color="default" label={`Relationships ${snapshotStats.relationshipCount}`} />
+      </Stack>
+      {snapshotEntities.length === 0 ? (
+        <Alert severity="info">Snapshot currently has no entities.</Alert>
+      ) : (
+        <List dense sx={{ border: "1px solid #e1e7f3", borderRadius: 1, maxHeight: 360, overflowY: "auto" }}>
+          {snapshotEntities.map((entity) => (
+            <ListItem key={entity.id} disableGutters>
+              <Stack spacing={1} sx={{ width: "100%" }}>
+                <ListItemText primary={getEntityLabel(entity)} secondary={`${entity.schema} - ${entity.id}`} />
+                <Stack direction="row" spacing={1}>
+                  {!isLikelyRelationshipSchema(entity.schema) && (
+                    <Button size="small" variant="outlined" onClick={() => enterFocusedInspect(entity.id, getEntityLabel(entity))}>
+                      Inspect
+                    </Button>
+                  )}
+                  <Button size="small" color="error" variant="outlined" onClick={() => onRemoveSnapshotEntity(entity.id)}>
+                    Remove
+                  </Button>
+                </Stack>
+              </Stack>
+            </ListItem>
+          ))}
+        </List>
+      )}
+    </Stack>
+  );
+
+  const rightInspectorTab = (
+    <Stack spacing={1.5}>
+      {selectedRelationshipId ? (
+        <>
+          <Typography variant="body2">
+            <strong>Selected relationship:</strong> {selectedRelationshipId}
+          </Typography>
+          {relationshipDetailQuery.isLoading && (
+            <Stack direction="row" spacing={1} alignItems="center">
+              <CircularProgress size={18} />
+              <Typography>Loading relationship details...</Typography>
+            </Stack>
+          )}
+          {selectedRelationshipId && relationshipDetailQuery.error instanceof Error && (
+            <Alert severity="info">
+              Relationship metadata is temporarily unavailable from backend: {relationshipDetailQuery.error.message}
+            </Alert>
+          )}
+          {relationshipDetailQuery.data && (
+            <Stack spacing={0.5}>
+              <Typography variant="body2">
+                <strong>Relationship:</strong> {getEntityLabel(relationshipDetailQuery.data)}
+              </Typography>
+              <Typography variant="body2">
+                <strong>Schema:</strong> {relationshipDetailQuery.data.schema}
+              </Typography>
+            </Stack>
+          )}
+        </>
+      ) : selectedEntityId ? (
+        <>
+          <Typography variant="body2">
+            <strong>Selected entity:</strong> {selectedEntityLabel || selectedEntityId}
+          </Typography>
+          {selectedEntityFromSnapshot && (
+            <Typography variant="body2">
+              <strong>Schema:</strong> {selectedEntityFromSnapshot.schema}
+            </Typography>
+          )}
+        </>
+      ) : (
+        <Alert severity="info">Select a node or relationship edge to inspect details.</Alert>
+      )}
+    </Stack>
+  );
+
+  const rightRelationshipsTab = (
+    <Stack spacing={1.5}>
+      {relationshipEntities.length > 0 ? (
+        <List dense sx={{ border: "1px solid #e1e7f3", borderRadius: 1, maxHeight: 280, overflowY: "auto" }}>
+          {relationshipEntities.map((relationship) => (
+            <ListItemButton
+              key={relationship.id}
+              selected={relationship.id === selectedRelationshipId}
+              onClick={() => onSelectRelationship(relationship.id)}
+            >
+              <ListItemText primary={getEntityLabel(relationship)} secondary={`${relationship.schema} - ${relationship.id}`} />
+            </ListItemButton>
+          ))}
+        </List>
+      ) : (
+        <Alert severity="info">No relationship entities are loaded for the selected entity neighborhood yet.</Alert>
+      )}
+
+      {!selectedRelationshipId && selectedRelationshipFromNeighborhood && !relationshipDetailQuery.isLoading && (
+        <Typography variant="body2" color="text.secondary">
+          Selected relationship: {getEntityLabel(selectedRelationshipFromNeighborhood)}
+        </Typography>
+      )}
+    </Stack>
+  );
+
+  const rightSourcesTab = (
+    <Stack spacing={1.5}>
+      {selectedRelationshipId ? (
+        <>
+          {relationshipDocumentsQuery.isLoading ? (
+            <Stack direction="row" spacing={1} alignItems="center">
+              <CircularProgress size={18} />
+              <Typography>Loading source documents for relationship...</Typography>
+            </Stack>
+          ) : relationshipDocumentsQuery.error instanceof Error ? (
+            <Alert severity="info">
+              Relationship source documents are temporarily unavailable: {relationshipDocumentsQuery.error.message}
+            </Alert>
+          ) : (
+            <>
+              <Typography variant="body2" color="text.secondary">
+                Total source documents: {relationshipDocumentsQuery.data?.total ?? 0}
+              </Typography>
+              <List dense>
+                {(relationshipDocumentsQuery.data?.results ?? []).map((document) => (
+                  <ListItem key={document.id} disableGutters>
+                    <Stack spacing={1} sx={{ width: "100%" }}>
+                      <ListItemText
+                        primary={document.filename}
+                        secondary={formatSourceDocumentLine(document)}
+                      />
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        component={RouterLink}
+                        to={buildDocumentInspectPath(document.id)}
+                      >
+                        Inspect in Documents
+                      </Button>
+                    </Stack>
+                  </ListItem>
+                ))}
+                {(relationshipDocumentsQuery.data?.results.length ?? 0) === 0 && (
+                  <ListItem disableGutters>
+                    <ListItemText primary="No source documents returned for this relationship." />
+                  </ListItem>
+                )}
+              </List>
+            </>
+          )}
+        </>
+      ) : selectedEntityId ? (
+        <>
+          <Typography variant="body2" color="text.secondary">
+            Selected entity: {selectedEntityLabel || selectedEntityId}
+          </Typography>
+          {entityDocumentsQuery.isLoading ? (
+            <Stack direction="row" spacing={1} alignItems="center">
+              <CircularProgress size={18} />
+              <Typography>Loading source documents for entity...</Typography>
+            </Stack>
+          ) : entityDocumentsQuery.error instanceof Error ? (
+            <Alert severity="info">
+              Entity source documents are temporarily unavailable: {entityDocumentsQuery.error.message}
+            </Alert>
+          ) : (
+            <>
+              <Typography variant="body2" color="text.secondary">
+                Total source documents: {entityDocumentsQuery.data?.total ?? 0}
+              </Typography>
+              <List dense>
+                {(entityDocumentsQuery.data?.results ?? []).map((document) => (
+                  <ListItem key={document.id} disableGutters>
+                    <Stack spacing={1} sx={{ width: "100%" }}>
+                      <ListItemText
+                        primary={document.filename}
+                        secondary={formatSourceDocumentLine(document)}
+                      />
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        component={RouterLink}
+                        to={buildDocumentInspectPath(document.id)}
+                      >
+                        Inspect in Documents
+                      </Button>
+                    </Stack>
+                  </ListItem>
+                ))}
+                {(entityDocumentsQuery.data?.results.length ?? 0) === 0 && (
+                  <ListItem disableGutters>
+                    <ListItemText primary="No source documents returned for this entity." />
+                  </ListItem>
+                )}
+              </List>
+            </>
+          )}
+        </>
+      ) : (
+        <Alert severity="info">
+          Select an entity node or relationship edge to load source documents from backend.
+        </Alert>
+      )}
+    </Stack>
+  );
+
+  const leftPane = (
+    <Paper variant="outlined" className="graph-workspace-panel">
+      <Stack direction="row" alignItems="center" sx={{ borderBottom: "1px solid #d9e2f0", px: 1 }}>
+        <Tabs value={workspaceLayout.leftTab} onChange={onLeftTabChange} variant="fullWidth">
+          <Tab value="search" label="Search" />
+          <Tab value="seed" label="Seed" />
+          <Tab value="snapshot" label="Snapshot" />
+        </Tabs>
+        {!isMobile && (
+          <Tooltip title="Collapse left panel">
+            <IconButton aria-label="Collapse left panel" size="small" onClick={collapseLeftPanel}>
+              <ChevronLeftIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        )}
+      </Stack>
+      <Box className="graph-workspace-panel-scroll" sx={{ p: 2 }}>
+        {workspaceLayout.leftTab === "search"
+          ? searchTab
+          : workspaceLayout.leftTab === "seed"
+            ? seedTab
+            : snapshotTab}
+      </Box>
+    </Paper>
+  );
+
+  const rightPane = (
+    <Paper variant="outlined" className="graph-workspace-panel">
+      <Stack direction="row" alignItems="center" sx={{ borderBottom: "1px solid #d9e2f0", px: 1 }}>
+        {!isMobile && (
+          <Tooltip title="Collapse right panel">
+            <IconButton aria-label="Collapse right panel" size="small" onClick={collapseRightPanel}>
+              <ChevronRightIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        )}
+        <Tabs value={workspaceLayout.rightTab} onChange={onRightTabChange} variant="fullWidth">
+          <Tab value="inspector" label="Inspector" />
+          <Tab value="relationships" label="Relations" />
+          <Tab value="sources" label="Sources" />
+        </Tabs>
+      </Stack>
+      <Box className="graph-workspace-panel-scroll" sx={{ p: 2 }}>
+        {workspaceLayout.rightTab === "inspector"
+          ? rightInspectorTab
+          : workspaceLayout.rightTab === "relationships"
+            ? rightRelationshipsTab
+            : rightSourcesTab}
+      </Box>
+    </Paper>
+  );
+
+  const leftCollapsedPane = (
+    <Box className="graph-workspace-collapsed">
+      <Tooltip title="Expand left panel">
+        <IconButton aria-label="Expand left panel" size="small" onClick={expandLeftPanel}>
+          <ChevronRightIcon fontSize="small" />
+        </IconButton>
+      </Tooltip>
+      <Divider flexItem sx={{ my: 0.5 }} />
+      <Tooltip title="Search tab">
+        <IconButton
+          size="small"
+          color={workspaceLayout.leftTab === "search" ? "primary" : "default"}
+          onClick={() => setWorkspaceLayout((current) => ({ ...current, leftTab: "search", leftCollapsed: false }))}
+        >
+          <SearchIcon fontSize="small" />
+        </IconButton>
+      </Tooltip>
+      <Tooltip title="Seed tab">
+        <IconButton
+          size="small"
+          color={workspaceLayout.leftTab === "seed" ? "primary" : "default"}
+          onClick={() => setWorkspaceLayout((current) => ({ ...current, leftTab: "seed", leftCollapsed: false }))}
+        >
+          <LayersIcon fontSize="small" />
+        </IconButton>
+      </Tooltip>
+      <Tooltip title="Snapshot tab">
+        <IconButton
+          size="small"
+          color={workspaceLayout.leftTab === "snapshot" ? "primary" : "default"}
+          onClick={() => setWorkspaceLayout((current) => ({ ...current, leftTab: "snapshot", leftCollapsed: false }))}
+        >
+          <DashboardCustomizeIcon fontSize="small" />
+        </IconButton>
+      </Tooltip>
+    </Box>
+  );
+
+  const rightCollapsedPane = (
+    <Box className="graph-workspace-collapsed">
+      <Tooltip title="Expand right panel">
+        <IconButton aria-label="Expand right panel" size="small" onClick={expandRightPanel}>
+          <ChevronLeftIcon fontSize="small" />
+        </IconButton>
+      </Tooltip>
+      <Divider flexItem sx={{ my: 0.5 }} />
+      <Tooltip title="Inspector tab">
+        <IconButton
+          size="small"
+          color={workspaceLayout.rightTab === "inspector" ? "primary" : "default"}
+          onClick={() => setWorkspaceLayout((current) => ({ ...current, rightTab: "inspector", rightCollapsed: false }))}
+        >
+          <InsightsIcon fontSize="small" />
+        </IconButton>
+      </Tooltip>
+      <Tooltip title="Relationships tab">
+        <IconButton
+          size="small"
+          color={workspaceLayout.rightTab === "relationships" ? "primary" : "default"}
+          onClick={() => setWorkspaceLayout((current) => ({ ...current, rightTab: "relationships", rightCollapsed: false }))}
+        >
+          <LayersIcon fontSize="small" />
+        </IconButton>
+      </Tooltip>
+      <Tooltip title="Sources tab">
+        <IconButton
+          size="small"
+          color={workspaceLayout.rightTab === "sources" ? "primary" : "default"}
+          onClick={() => setWorkspaceLayout((current) => ({ ...current, rightTab: "sources", rightCollapsed: false }))}
+        >
+          <DashboardCustomizeIcon fontSize="small" />
+        </IconButton>
+      </Tooltip>
+    </Box>
+  );
+
+  const centerPane = (
+    <Paper variant="outlined" className="graph-workspace-panel" sx={{ display: "flex", flexDirection: "column" }}>
+      <Box sx={{ px: 2, py: 1.5, borderBottom: "1px solid #d9e2f0" }}>
+        <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2} alignItems={{ sm: "center" }} justifyContent="space-between">
+          <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+            <Chip color="primary" label={`Entities ${snapshotStats.total}`} />
+            <Chip color="default" label={`Nodes ${snapshotStats.nodeCount}`} />
+            <Chip color="default" label={`Relationships ${snapshotStats.relationshipCount}`} />
+            <Chip
+              color={isFocusedInspectActive ? "secondary" : "default"}
+              label={isFocusedInspectActive ? "Focused Inspect View" : "Full Snapshot View"}
+            />
+          </Stack>
+          <Stack direction="row" spacing={1}>
+            {isFocusedInspectActive && (
+              <Button variant="outlined" onClick={exitFocusedInspect}>
+                Back to Full Snapshot
+              </Button>
+            )}
+            <Button
+              variant="contained"
+              startIcon={<SaveIcon />}
+              onClick={() => saveSnapshotMutation.mutate()}
+              disabled={saveSnapshotMutation.isPending}
+            >
+              {saveSnapshotMutation.isPending ? "Saving..." : isSnapshotDirty ? "Save Snapshot *" : "Save Snapshot"}
+            </Button>
+          </Stack>
+        </Stack>
+        {saveSnapshotMutation.error instanceof Error && (
+          <Alert sx={{ mt: 1.2 }} severity="error">
+            Could not save project snapshot. Backend error: {saveSnapshotMutation.error.message}
+          </Alert>
+        )}
+        {isSnapshotDirty && !saveSnapshotMutation.isPending && (
+          <Alert sx={{ mt: 1.2 }} severity="warning">
+            Snapshot has unsaved changes.
+          </Alert>
+        )}
+        {saveSnapshotMutation.isSuccess && (
+          <Alert sx={{ mt: 1.2 }} severity="success">
+            Snapshot saved to backend project store.
+          </Alert>
+        )}
+        {selectedEntityId && neighborhoodQuery.isFetching && (
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 1.2 }}>
+            <CircularProgress size={18} />
+            <Typography variant="body2">Loading entity neighborhood...</Typography>
+          </Stack>
+        )}
+        {neighborhoodQuery.error instanceof Error && (
+          <Alert sx={{ mt: 1.2 }} severity="error">
+            Could not load live relationships for this entity. Please try Inspect again. Backend error:{" "}
+            {neighborhoodQuery.error.message}
+          </Alert>
+        )}
+        {partialNeighborhoodMessage && (
+          <Alert sx={{ mt: 1.2 }} severity="info">
+            {partialNeighborhoodMessage}
+          </Alert>
+        )}
+        {showNoDirectNeighborsMessage && (
+          <Alert sx={{ mt: 1.2 }} severity="info">
+            No direct neighbors found; showing selected entity only.
+          </Alert>
+        )}
+      </Box>
+      <Box sx={{ p: 1.5, flex: 1, minHeight: 0 }}>
+        {displayedGraph.nodes.length > 0 ? (
+          <Box sx={{ height: "100%", minHeight: 420 }} className="graph-panel">
+            <GraphRendererHost
+              rendererId={rendererId}
+              graph={displayedGraph}
+              selectedNodeId={selectedEntityId}
+              selectedEdgeId={selectedEdgeId}
+              onNodeClick={handleNodeClick}
+              onEdgeClick={onSelectEdge}
+            />
+          </Box>
+        ) : (
+          <Alert severity="info">
+            This project snapshot has no graph entities yet. Use global search or document seeding to add entities.
+          </Alert>
+        )}
+      </Box>
+    </Paper>
+  );
 
   if (!projectId) {
     return <Alert severity="error">Project id is missing from route.</Alert>;
@@ -669,617 +1628,53 @@ export function ProjectGraphPage(): JSX.Element {
   }
 
   return (
-    <Stack spacing={3}>
+    <Stack spacing={2.5}>
       <Stack
-        direction={{ xs: "column", sm: "row" }}
+        direction={{ xs: "column", md: "row" }}
         justifyContent="space-between"
-        alignItems={{ xs: "flex-start", sm: "center" }}
-        spacing={2}
+        alignItems={{ xs: "flex-start", md: "center" }}
+        spacing={1.5}
       >
         <Box>
           <Typography variant="h4" sx={{ fontWeight: 700 }}>
-            Graph Explorer
+            Graph Workspace
           </Typography>
           <Typography color="text.secondary">
-            {projectQuery.data.name} - curated snapshot graph powered by live backend entities.
+            {projectQuery.data.name} - center graph with operations on the left and insights on the right.
           </Typography>
         </Box>
 
         <Stack direction="row" spacing={1.2}>
-          <Button
-            component={RouterLink}
-            to={`/projects/${projectQuery.data.id}`}
-            variant="outlined"
-            startIcon={<ArrowBackIcon />}
-          >
-            Project
+          <Button component={RouterLink} to="/projects" variant="outlined" startIcon={<ArrowBackIcon />}>
+            Projects
           </Button>
-          <Button
-            variant="contained"
-            startIcon={<SaveIcon />}
-            onClick={() => saveSnapshotMutation.mutate()}
-            disabled={saveSnapshotMutation.isPending}
-          >
-            {saveSnapshotMutation.isPending ? "Saving..." : isSnapshotDirty ? "Save Snapshot *" : "Save Snapshot"}
-          </Button>
+          {isMobile && (
+            <>
+              <Button variant="outlined" onClick={() => setMobileLeftOpen(true)}>
+                Left Tabs
+              </Button>
+              <Button variant="outlined" onClick={() => setMobileRightOpen(true)}>
+                Right Tabs
+              </Button>
+            </>
+          )}
         </Stack>
       </Stack>
 
-      <Alert severity="info">
-        Flow: search snapshot or global entities, add or remove from snapshot, then save to persist graph state.
-      </Alert>
-
-      <Card variant="outlined">
-        <CardContent>
-          <Stack direction={{ xs: "column", sm: "row" }} spacing={3}>
-            <Box>
-              <Typography variant="subtitle2" color="text.secondary">
-                Snapshot Entities
-              </Typography>
-              <Typography variant="h5" sx={{ fontWeight: 700 }}>
-                {snapshotStats.total}
-              </Typography>
-            </Box>
-            <Box>
-              <Typography variant="subtitle2" color="text.secondary">
-                Node Entities
-              </Typography>
-              <Typography variant="h5" sx={{ fontWeight: 700 }}>
-                {snapshotStats.nodeCount}
-              </Typography>
-            </Box>
-            <Box>
-              <Typography variant="subtitle2" color="text.secondary">
-                Relationship Entities
-              </Typography>
-              <Typography variant="h5" sx={{ fontWeight: 700 }}>
-                {snapshotStats.relationshipCount}
-              </Typography>
-            </Box>
-          </Stack>
-
-          {saveSnapshotMutation.error instanceof Error && (
-            <Alert sx={{ mt: 2 }} severity="error">
-              Could not save project snapshot. Backend error: {saveSnapshotMutation.error.message}
-            </Alert>
-          )}
-          {isSnapshotDirty && !saveSnapshotMutation.isPending && (
-            <Alert sx={{ mt: 2 }} severity="warning">
-              Snapshot has unsaved changes.
-            </Alert>
-          )}
-          {saveSnapshotMutation.isSuccess && (
-            <Alert sx={{ mt: 2 }} severity="success">
-              Snapshot saved to backend project store.
-            </Alert>
-          )}
-        </CardContent>
-      </Card>
-
-      <Paper variant="outlined" sx={{ p: 2 }}>
-        <Stack
-          direction={{ xs: "column", sm: "row" }}
-          spacing={2}
-          justifyContent="space-between"
-          alignItems={{ xs: "stretch", sm: "center" }}
-          sx={{ mb: 2 }}
-        >
-          <Typography variant="subtitle2" color="text.secondary">
-            Visualization Renderer
-          </Typography>
-
-          <FormControl size="small" sx={{ minWidth: 220 }}>
-            <InputLabel id="renderer-select-label">Renderer</InputLabel>
-            <Select
-              labelId="renderer-select-label"
-              label="Renderer"
-              value={rendererId}
-              onChange={handleRendererChange}
-            >
-              {graphRendererDefinitions.map((renderer) => (
-                <MenuItem key={renderer.id} value={renderer.id}>
-                  {renderer.label}
-                </MenuItem>
-              ))}
-            </Select>
-          </FormControl>
-        </Stack>
-
-        <Divider sx={{ mb: 2 }} />
-
-        <Stack spacing={1.5} sx={{ mb: 2 }}>
-          <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2} alignItems={{ sm: "center" }}>
-            <Typography variant="subtitle2" color="text.secondary">
-              Schema Visibility
-            </Typography>
-            <Stack direction="row" spacing={1}>
-              <Button size="small" variant="outlined" onClick={showAllSchemas}>
-                Show All
-              </Button>
-              <Button size="small" variant="outlined" onClick={hideAllSchemas} disabled={snapshotSchemas.length === 0}>
-                Hide All
-              </Button>
-            </Stack>
-          </Stack>
-          <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-            {snapshotSchemas.map((schema) => {
-              const hidden = hiddenSchemas.includes(schema);
-              return (
-                <Chip
-                  key={schema}
-                  label={schema}
-                  color={hidden ? "default" : "primary"}
-                  variant={hidden ? "outlined" : "filled"}
-                  onClick={() => toggleSchemaVisibility(schema)}
-                />
-              );
-            })}
-            {snapshotSchemas.length === 0 && (
-              <Typography variant="body2" color="text.secondary">
-                No schemas found in this snapshot.
-              </Typography>
-            )}
-          </Stack>
-        </Stack>
-
-        <Divider sx={{ mb: 2 }} />
-
-        <Stack spacing={1.5} sx={{ mb: 2 }}>
-          <Typography variant="subtitle2" color="text.secondary">
-            View Presets (Local Only)
-          </Typography>
-          <Stack direction={{ xs: "column", sm: "row" }} spacing={1.2}>
-            <FormControl size="small" sx={{ minWidth: 220 }}>
-              <InputLabel id="preset-select-label">Preset</InputLabel>
-              <Select
-                labelId="preset-select-label"
-                label="Preset"
-                value={selectedPresetId}
-                onChange={handlePresetSelectionChange}
-              >
-                <MenuItem value="">None</MenuItem>
-                {viewPresets.map((preset) => (
-                  <MenuItem key={preset.id} value={preset.id}>
-                    {preset.name}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-            <TextField
-              size="small"
-              label="Preset name"
-              value={presetNameInput}
-              onChange={(event) => setPresetNameInput(event.target.value)}
-            />
-            <Button size="small" variant="outlined" onClick={handleSavePreset} disabled={presetNameInput.trim().length === 0}>
-              Save
-            </Button>
-            <Button size="small" variant="outlined" onClick={handleApplyPreset} disabled={!selectedPresetId}>
-              Apply
-            </Button>
-            <Button size="small" variant="outlined" onClick={handleRenamePreset} disabled={!selectedPresetId || presetNameInput.trim().length === 0}>
-              Rename
-            </Button>
-            <Button size="small" variant="outlined" color="error" onClick={handleDeletePreset} disabled={!selectedPresetId}>
-              Delete
-            </Button>
-          </Stack>
-        </Stack>
-
-        <form onSubmit={submitSnapshotSearch}>
-          <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
-            <TextField
-              fullWidth
-              label="Search within snapshot"
-              placeholder="e.g. Eleanor Grant"
-              value={snapshotSearchInput}
-              onChange={(event) => setSnapshotSearchInput(event.target.value)}
-            />
-            <Button
-              type="submit"
-              variant="contained"
-              startIcon={<SearchIcon />}
-              disabled={snapshotSearchInput.trim().length === 0}
-            >
-              Search Snapshot
-            </Button>
-          </Stack>
-        </form>
-
-        <Divider sx={{ my: 2 }} />
-
-        {snapshotSearchQuery.isFetching && (
-          <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2 }}>
-            <CircularProgress size={20} />
-            <Typography variant="body2">Searching snapshot entities...</Typography>
-          </Stack>
-        )}
-
-        {snapshotSearchQuery.error instanceof Error && (
-          <Alert severity="error">{snapshotSearchQuery.error.message}</Alert>
-        )}
-
-        {!isSnapshotResultsCollapsed && snapshotActiveQuery && (
-          <>
-            {scopedSearchHits.length === 0 ? (
-              <Alert severity="info">
-                No snapshot entity matches for "{snapshotActiveQuery}".
-              </Alert>
-            ) : (
-              <List dense sx={{ border: "1px solid #e1e7f3", borderRadius: 1, mb: 2 }}>
-                {scopedSearchHits.map((hit) => (
-                  <ListItemButton
-                    key={hit.entityId}
-                    selected={selectedEntityId === hit.entityId}
-                    onClick={() => selectEntity(hit.entityId, hit.label)}
-                  >
-                    <ListItemText primary={hit.label} secondary={hit.type} />
-                  </ListItemButton>
-                ))}
-              </List>
-            )}
-          </>
-        )}
-
-        <Divider sx={{ my: 2 }} />
-
-        <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>
-          Global Backend Search
-        </Typography>
-
-        <form onSubmit={submitGlobalSearch}>
-          <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
-            <TextField
-              fullWidth
-              label="Search all visible backend entities"
-              placeholder="e.g. Acme Corp"
-              value={globalSearchInput}
-              onChange={(event) => setGlobalSearchInput(event.target.value)}
-            />
-            <Button
-              type="submit"
-              variant="outlined"
-              startIcon={<SearchIcon />}
-              disabled={globalSearchInput.trim().length === 0}
-            >
-              Search Global
-            </Button>
-          </Stack>
-        </form>
-
-        {globalSearchQuery.isFetching && (
-          <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 2 }}>
-            <CircularProgress size={20} />
-            <Typography variant="body2">Searching backend entities...</Typography>
-          </Stack>
-        )}
-
-        {globalSearchQuery.error instanceof Error && (
-          <Alert sx={{ mt: 2 }} severity="error">
-            {globalSearchQuery.error.message}
-          </Alert>
-        )}
-
-        {!isGlobalResultsCollapsed && globalActiveQuery && (
-          <>
-            {globalSearchHits.length === 0 ? (
-              <Alert sx={{ mt: 2 }} severity="info">
-                No global entities match "{globalActiveQuery}".
-              </Alert>
-            ) : (
-              <List dense sx={{ border: "1px solid #e1e7f3", borderRadius: 1, mt: 2 }}>
-                {globalSearchHits.map((hit) => (
-                  <ListItem key={hit.entityId} disableGutters>
-                    <Stack
-                      direction={{ xs: "column", sm: "row" }}
-                      spacing={1}
-                      alignItems={{ xs: "stretch", sm: "center" }}
-                      justifyContent="space-between"
-                      sx={{ width: "100%" }}
-                    >
-                      <ListItemText primary={hit.label} secondary={`${hit.type} - ${hit.entityId}`} />
-                      <Stack direction="row" spacing={1}>
-                        <Button size="small" variant="outlined" onClick={() => selectEntity(hit.entityId, hit.label)}>
-                          Inspect
-                        </Button>
-                        <Button size="small" variant="contained" onClick={() => onAddGlobalEntity(hit.entityId, hit.label)}>
-                          Add to Snapshot
-                        </Button>
-                      </Stack>
-                    </Stack>
-                  </ListItem>
-                ))}
-              </List>
-            )}
-          </>
-        )}
-      </Paper>
-
-      <Card variant="outlined">
-        <CardContent>
-          <Stack spacing={2}>
-            <Typography variant="h6" sx={{ fontWeight: 700 }}>
-              Snapshot Curation
-            </Typography>
-            <Typography variant="body2" color="text.secondary">
-              Remove entities from this project snapshot. Relationship entities tied to removed nodes are also removed.
-            </Typography>
-            {snapshotEntities.length === 0 ? (
-              <Alert severity="info">Snapshot currently has no entities.</Alert>
-            ) : (
-              <List dense sx={{ border: "1px solid #e1e7f3", borderRadius: 1, maxHeight: 260, overflowY: "auto" }}>
-                {snapshotEntities.map((entity) => (
-                  <ListItem key={entity.id} disableGutters>
-                    <Stack
-                      direction={{ xs: "column", sm: "row" }}
-                      spacing={1}
-                      alignItems={{ xs: "stretch", sm: "center" }}
-                      justifyContent="space-between"
-                      sx={{ width: "100%" }}
-                    >
-                      <ListItemText
-                        primary={getEntityLabel(entity)}
-                        secondary={`${entity.schema} - ${entity.id}`}
-                      />
-                      <Button
-                        size="small"
-                        color="error"
-                        variant="outlined"
-                        onClick={() => onRemoveSnapshotEntity(entity.id)}
-                      >
-                        Remove
-                      </Button>
-                    </Stack>
-                  </ListItem>
-                ))}
-              </List>
-            )}
-          </Stack>
-        </CardContent>
-      </Card>
-
-      {selectedEntityId && neighborhoodQuery.isFetching && (
-        <Stack direction="row" spacing={1} alignItems="center">
-          <CircularProgress size={22} />
-          <Typography>Loading entity neighborhood...</Typography>
-        </Stack>
-      )}
-
-      {neighborhoodQuery.error instanceof Error && (
-        <Alert severity="error">
-          Could not load live relationships for this entity. Please try Inspect again. Backend error:{" "}
-          {neighborhoodQuery.error.message}
-        </Alert>
-      )}
-
-      {partialNeighborhoodMessage && (
-        <Alert severity="info">{partialNeighborhoodMessage}</Alert>
-      )}
-
-      {snapshotGraph.nodes.length > 0 ? (
-        <Box className="graph-panel">
-          <GraphRendererHost
-            rendererId={rendererId}
-            graph={snapshotGraph}
-            selectedNodeId={selectedEntityId}
-            selectedEdgeId={selectedEdgeId}
-            onNodeClick={handleNodeClick}
-            onEdgeClick={onSelectEdge}
-          />
-        </Box>
-      ) : (
-        <Alert severity="info">
-          This project snapshot has no graph entities yet. Use global search or document seeding to add entities.
-        </Alert>
-      )}
-
-      <Card variant="outlined">
-        <CardContent>
-          <Stack spacing={2}>
-            <Typography variant="h6" sx={{ fontWeight: 700 }}>
-              Source Documents
-            </Typography>
-
-            {selectedRelationshipId ? (
-              <>
-                <Typography variant="body2" color="text.secondary">
-                  Selected relationship: {selectedRelationshipId}
-                </Typography>
-
-                {relationshipDocumentsQuery.isLoading ? (
-                  <Stack direction="row" spacing={1} alignItems="center">
-                    <CircularProgress size={18} />
-                    <Typography>Loading source documents for relationship...</Typography>
-                  </Stack>
-                ) : relationshipDocumentsQuery.error instanceof Error ? (
-                  <Alert severity="error">
-                    Backend unavailable for this operation: {relationshipDocumentsQuery.error.message}
-                  </Alert>
-                ) : (
-                  <>
-                    <Typography variant="body2" color="text.secondary">
-                      Total source documents: {relationshipDocumentsQuery.data?.total ?? 0}
-                    </Typography>
-                    <List dense>
-                      {(relationshipDocumentsQuery.data?.results ?? []).map((document) => (
-                        <ListItem key={document.id} disableGutters>
-                          <Stack
-                            direction={{ xs: "column", sm: "row" }}
-                            spacing={1}
-                            alignItems={{ xs: "stretch", sm: "center" }}
-                            justifyContent="space-between"
-                            sx={{ width: "100%" }}
-                          >
-                            <ListItemText
-                              primary={document.filename}
-                              secondary={formatSourceDocumentLine(document)}
-                            />
-                            <Button
-                              size="small"
-                              variant="outlined"
-                              component={RouterLink}
-                              to={buildDocumentInspectPath(document.id)}
-                            >
-                              Inspect in Documents
-                            </Button>
-                          </Stack>
-                        </ListItem>
-                      ))}
-                      {(relationshipDocumentsQuery.data?.results.length ?? 0) === 0 && (
-                        <ListItem disableGutters>
-                          <ListItemText primary="No source documents returned for this relationship." />
-                        </ListItem>
-                      )}
-                    </List>
-                  </>
-                )}
-              </>
-            ) : selectedEntityId ? (
-              <>
-                <Typography variant="body2" color="text.secondary">
-                  Selected entity: {selectedEntityLabel || selectedEntityId}
-                </Typography>
-
-                {entityDocumentsQuery.isLoading ? (
-                  <Stack direction="row" spacing={1} alignItems="center">
-                    <CircularProgress size={18} />
-                    <Typography>Loading source documents for entity...</Typography>
-                  </Stack>
-                ) : entityDocumentsQuery.error instanceof Error ? (
-                  <Alert severity="error">
-                    Backend unavailable for this operation: {entityDocumentsQuery.error.message}
-                  </Alert>
-                ) : (
-                  <>
-                    <Typography variant="body2" color="text.secondary">
-                      Total source documents: {entityDocumentsQuery.data?.total ?? 0}
-                    </Typography>
-                    <List dense>
-                      {(entityDocumentsQuery.data?.results ?? []).map((document) => (
-                        <ListItem key={document.id} disableGutters>
-                          <Stack
-                            direction={{ xs: "column", sm: "row" }}
-                            spacing={1}
-                            alignItems={{ xs: "stretch", sm: "center" }}
-                            justifyContent="space-between"
-                            sx={{ width: "100%" }}
-                          >
-                            <ListItemText
-                              primary={document.filename}
-                              secondary={formatSourceDocumentLine(document)}
-                            />
-                            <Button
-                              size="small"
-                              variant="outlined"
-                              component={RouterLink}
-                              to={buildDocumentInspectPath(document.id)}
-                            >
-                              Inspect in Documents
-                            </Button>
-                          </Stack>
-                        </ListItem>
-                      ))}
-                      {(entityDocumentsQuery.data?.results.length ?? 0) === 0 && (
-                        <ListItem disableGutters>
-                          <ListItemText primary="No source documents returned for this entity." />
-                        </ListItem>
-                      )}
-                    </List>
-                  </>
-                )}
-              </>
-            ) : (
-              <Alert severity="info">
-                Select an entity node or relationship edge to load source documents from backend.
-              </Alert>
-            )}
-          </Stack>
-        </CardContent>
-      </Card>
-
-      <Card variant="outlined">
-        <CardContent>
-          <Stack spacing={2}>
-            <Typography variant="h6" sx={{ fontWeight: 700 }}>
-              Relationship Source Documents
-            </Typography>
-
-            {!selectedEntityId && !selectedRelationshipId ? (
-              <Alert severity="info">
-                Select an entity node or relationship edge to load relationship details and source documents from backend.
-              </Alert>
-            ) : (
-              <>
-                {relationshipEntities.length > 0 ? (
-                  <>
-                    <Typography variant="body2" color="text.secondary">
-                      Select a relationship entity to view its metadata and source documents.
-                    </Typography>
-
-                    <List dense sx={{ border: "1px solid #e1e7f3", borderRadius: 1, maxHeight: 220, overflowY: "auto" }}>
-                      {relationshipEntities.map((relationship) => (
-                        <ListItemButton
-                          key={relationship.id}
-                          selected={relationship.id === selectedRelationshipId}
-                          onClick={() => onSelectRelationship(relationship.id)}
-                        >
-                          <ListItemText
-                            primary={getEntityLabel(relationship)}
-                            secondary={`${relationship.schema} - ${relationship.id}`}
-                          />
-                        </ListItemButton>
-                      ))}
-                    </List>
-                  </>
-                ) : (
-                  <Alert severity="info">
-                    No relationship entities are loaded for the selected entity neighborhood yet.
-                  </Alert>
-                )}
-
-                {relationshipDetailQuery.isLoading && selectedRelationshipId && (
-                  <Stack direction="row" spacing={1} alignItems="center">
-                    <CircularProgress size={18} />
-                    <Typography>Loading relationship details...</Typography>
-                  </Stack>
-                )}
-
-                {selectedRelationshipId && relationshipDetailQuery.error instanceof Error && (
-                  <Alert severity="info">
-                    Relationship metadata is temporarily unavailable from backend: {relationshipDetailQuery.error.message}
-                  </Alert>
-                )}
-
-                {relationshipDetailQuery.data && (
-                  <Stack spacing={0.5}>
-                    <Typography variant="body2">
-                      <strong>Relationship:</strong> {getEntityLabel(relationshipDetailQuery.data)}
-                    </Typography>
-                    <Typography variant="body2">
-                      <strong>Schema:</strong> {relationshipDetailQuery.data.schema}
-                    </Typography>
-                    <Typography variant="body2">
-                      <strong>ID:</strong> {relationshipDetailQuery.data.id}
-                    </Typography>
-                  </Stack>
-                )}
-
-                {!selectedRelationshipId && (
-                  <Alert severity="info">
-                    Select a relationship edge or relationship list item to request backend source documents.
-                  </Alert>
-                )}
-
-                {!relationshipDetailQuery.data && selectedRelationshipFromNeighborhood && !relationshipDetailQuery.isLoading && (
-                  <Typography variant="body2" color="text.secondary">
-                    Selected relationship: {getEntityLabel(selectedRelationshipFromNeighborhood)}
-                  </Typography>
-                )}
-              </>
-            )}
-          </Stack>
-        </CardContent>
-      </Card>
+      <GraphWorkspaceLayout
+        isMobile={isMobile}
+        state={workspaceLayout}
+        setState={setWorkspaceLayout}
+        centerPane={centerPane}
+        leftPane={leftPane}
+        rightPane={rightPane}
+        leftCollapsedPane={leftCollapsedPane}
+        rightCollapsedPane={rightCollapsedPane}
+        mobileLeftOpen={mobileLeftOpen}
+        mobileRightOpen={mobileRightOpen}
+        onMobileLeftOpenChange={setMobileLeftOpen}
+        onMobileRightOpenChange={setMobileRightOpen}
+      />
     </Stack>
   );
 }

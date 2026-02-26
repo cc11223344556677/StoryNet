@@ -14,7 +14,7 @@ a {
 
 .graph-panel {
   width: 100%;
-  height: clamp(420px, 62vh, 760px);
+  height: clamp(460px, 68vh, 820px);
 }
 
 .graph-canvas {
@@ -24,4 +24,63 @@ a {
   border-radius: 12px;
   border: 1px solid #d9e2f0;
   background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+}
+
+.graph-workspace-grid {
+  display: grid;
+  width: 100%;
+  gap: 0;
+  align-items: stretch;
+}
+
+.graph-workspace-sidebar {
+  min-height: clamp(540px, 76vh, 900px);
+  overflow: hidden;
+}
+
+.graph-workspace-center {
+  min-width: 0;
+  min-height: clamp(540px, 76vh, 900px);
+}
+
+.graph-workspace-resizer {
+  width: 8px;
+  cursor: col-resize;
+  border-radius: 8px;
+  background: transparent;
+  transition: background-color 120ms ease;
+}
+
+.graph-workspace-resizer:hover {
+  background: rgba(11, 94, 215, 0.14);
+}
+
+.graph-workspace-panel {
+  height: 100%;
+  border: 1px solid #d9e2f0;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+  overflow: hidden;
+}
+
+.graph-workspace-panel-scroll {
+  height: calc(100% - 52px);
+  overflow: auto;
+}
+
+.graph-workspace-collapsed {
+  height: 100%;
+  border: 1px solid #d9e2f0;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  padding-top: 8px;
+  gap: 6px;
+}
+
+.graph-workspace-mobile-center {
+  width: 100%;
 }

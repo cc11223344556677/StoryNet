@@ -10,7 +10,6 @@ import {
 } from "@mui/material";
 import { RequireAuth, PublicOnlyRoute, useAuth } from "./auth";
 import { ProjectsPage } from "../features/projects/ProjectsPage";
-import { ProjectDetailPage } from "../features/uploads/ProjectDetailPage";
 import { ProjectGraphPage } from "../features/graph/ProjectGraphPage";
 import { DocumentsPage } from "../features/documents/DocumentsPage";
 import { JobsPage } from "../features/documents/JobsPage";
@@ -134,10 +133,13 @@ function AnonymousRoute({ children }: { children: JSX.Element }): JSX.Element {
 }
 
 export function App(): JSX.Element {
+  const location = useLocation();
+  const isGraphRoute = location.pathname.includes("/graph");
+
   return (
     <>
       <NavigationBar />
-      <Container sx={{ py: 4 }} maxWidth="lg">
+      <Container sx={{ py: 4 }} maxWidth={isGraphRoute ? false : "lg"}>
         <Routes>
           <Route path="/" element={<RootRedirect />} />
 
@@ -170,7 +172,7 @@ export function App(): JSX.Element {
             path="/projects/:projectId"
             element={
               <AuthenticatedRoute>
-                <ProjectDetailPage />
+                <Navigate to="graph" replace />
               </AuthenticatedRoute>
             }
           />

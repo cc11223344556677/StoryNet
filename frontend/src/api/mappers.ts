@@ -10,17 +10,30 @@ import type {
   ProjectDto
 } from "../types/domain";
 
-const RELATIONSHIP_SCHEMA_HINTS = [
-  "ownership",
-  "membership",
-  "directorship",
-  "family",
-  "associate",
-  "unknownlink",
-  "sanction",
-  "payment",
-  "relationship"
+const RELATIONSHIP_SCHEMAS = [
+  "Associate",
+  "Debt",
+  "Directorship",
+  "Employment",
+  "Family",
+  "Membership",
+  "Occupancy",
+  "Ownership",
+  "Payment",
+  "ProjectParticipant",
+  "Representation",
+  "Similar",
+  "Succession",
+  "UnknownLink"
 ];
+
+function normalizeSchemaName(value: string): string {
+  return value.replace(/[\s_-]+/g, "").toLowerCase();
+}
+
+const RELATIONSHIP_SCHEMA_SET = new Set(
+  RELATIONSHIP_SCHEMAS.map((schema) => normalizeSchemaName(schema))
+);
 
 export function getEntityLabel(entity: FtMEntity): string {
   const caption = entity.caption?.trim();
@@ -85,8 +98,13 @@ export function mapEntityToGraphNode(entity: FtMEntity): GraphNode {
 }
 
 export function isLikelyRelationshipSchema(schema: string): boolean {
-  const normalized = schema.toLowerCase();
-  return RELATIONSHIP_SCHEMA_HINTS.some((hint) => normalized.includes(hint));
+  const normalized = normalizeSchemaName(schema);
+  if (RELATIONSHIP_SCHEMA_SET.has(normalized)) {
+    return true;
+  }
+
+  // Backward-compatible fallback for unexpected custom interval schemas.
+  return normalized.includes("relationship");
 }
 
 function collectReferencedEntityIds(

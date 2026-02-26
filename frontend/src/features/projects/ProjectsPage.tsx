@@ -21,7 +21,6 @@ import {
 import EditIcon from "@mui/icons-material/Edit";
 import DeleteIcon from "@mui/icons-material/Delete";
 import HubIcon from "@mui/icons-material/Hub";
-import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import AddIcon from "@mui/icons-material/Add";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import type { CreateProjectRequest, ProjectCardVM, UpdateProjectRequest } from "../../types/domain";
@@ -158,10 +157,6 @@ export function ProjectsPage(): JSX.Element {
         </Stack>
       </Stack>
 
-      <Alert severity="info">
-        Flow: upload documents, extract entities, seed or create a project snapshot, then explore graph.
-      </Alert>
-
       {createProjectMutation.error instanceof Error && (
         <Alert severity="error">{createProjectMutation.error.message}</Alert>
       )}
@@ -263,19 +258,18 @@ export function ProjectsPage(): JSX.Element {
                       <>
                         <Button
                           component={RouterLink}
-                          to={`/projects/${project.id}`}
-                          startIcon={<FolderOpenIcon />}
+                          to={`/projects/${project.id}/graph`}
+                          startIcon={<HubIcon />}
                           variant="contained"
                         >
-                          Open
+                          Open Graph
                         </Button>
                         <Button
                           component={RouterLink}
-                          to={`/projects/${project.id}/graph`}
-                          startIcon={<HubIcon />}
+                          to={`/projects/${project.id}`}
                           variant="outlined"
                         >
-                          Graph
+                          Workspace
                         </Button>
                         <Button startIcon={<EditIcon />} onClick={() => beginEdit(project)}>
                           Edit

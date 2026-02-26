@@ -1,4 +1,4 @@
-import { ChangeEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, DragEvent, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Alert,
@@ -52,10 +52,28 @@ import {
 
 const TERMINAL_JOB_STATES: ReadonlySet<DocumentStatus> = new Set(["completed", "failed"]);
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
-const JOB_POLL_MAX_MS = 5 * 60 * 1000;
+const JOB_POLL_INTERVAL_MS = 1500;
 const SET_PUBLIC_VERIFY_DELAY_MS = 600;
 const REMOVE_OWNERSHIP_VERIFY_DELAY_MS = 600;
 const ENTITY_PANEL_MIN_HEIGHT = 180;
+
+type UploadQueueStatus =
+  | "queued"
+  | "uploading"
+  | "polling"
+  | "completed"
+  | "failed";
+
+interface UploadQueueItem {
+  id: string;
+  file: File;
+  type: DocumentType | null;
+  validationError: string | null;
+  status: UploadQueueStatus;
+  jobId: string | null;
+  backendStatus: DocumentStatus | null;
+  message: string | null;
+}
 
 type EntityPanelState =
   | "loading"
@@ -143,6 +161,19 @@ function validateFile(file: File): string | null {
   return null;
 }
 
+function buildUploadQueueItem(file: File): UploadQueueItem {
+  return {
+    id: `upload-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+    file,
+    type: detectDocumentType(file),
+    validationError: validateFile(file),
+    status: "queued",
+    jobId: null,
+    backendStatus: null,
+    message: null
+  };
+}
+
 export function DocumentsPage(): JSX.Element {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -150,12 +181,9 @@ export function DocumentsPage(): JSX.Element {
 
   const [statusFilter, setStatusFilter] = useState<DocumentStatus | "">("");
   const [typeFilter, setTypeFilter] = useState<DocumentType | "">("");
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [selectedFileError, setSelectedFileError] = useState<string | null>(null);
+  const [uploadQueue, setUploadQueue] = useState<UploadQueueItem[]>([]);
+  const [isUploadingQueue, setIsUploadingQueue] = useState(false);
   const [makePublic, setMakePublic] = useState(false);
-  const [activeJobId, setActiveJobId] = useState<string | null>(null);
-  const [jobStartedAt, setJobStartedAt] = useState<number | null>(null);
-  const [pollTimedOut, setPollTimedOut] = useState(false);
   const [lastJob, setLastJob] = useState<JobStatus | null>(null);
   const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null);
   const [entitySchemaFilter, setEntitySchemaFilter] = useState("");
@@ -207,54 +235,107 @@ export function DocumentsPage(): JSX.Element {
     enabled: addSeedDialogOpen
   });
 
-  const jobQuery = useQuery({
-    queryKey: ["job", activeJobId],
-    queryFn: () => apiClient.getJob(activeJobId!),
-    enabled: Boolean(activeJobId),
-    refetchInterval: (query) => {
-      const currentStatus = query.state.data?.status;
-      if (currentStatus && TERMINAL_JOB_STATES.has(currentStatus)) {
-        return false;
-      }
-
-      if (jobStartedAt && Date.now() - jobStartedAt >= JOB_POLL_MAX_MS) {
-        return false;
-      }
-
-      return 1500;
-    }
-  });
+  const pollingQueueItems = useMemo(
+    () =>
+      uploadQueue.filter(
+        (item): item is UploadQueueItem & { jobId: string } => item.status === "polling" && Boolean(item.jobId)
+      ),
+    [uploadQueue]
+  );
 
   useEffect(() => {
-    if (!activeJobId || !jobStartedAt) {
+    if (pollingQueueItems.length === 0) {
       return;
     }
 
-    setPollTimedOut(false);
-    const timeoutId = window.setTimeout(() => {
-      setPollTimedOut(true);
-    }, JOB_POLL_MAX_MS);
+    let cancelled = false;
+
+    const pollOnce = async (): Promise<void> => {
+      const results = await Promise.allSettled(
+        pollingQueueItems.map(async (item) => ({
+          itemId: item.id,
+          status: await apiClient.getJob(item.jobId)
+        }))
+      );
+
+      if (cancelled) {
+        return;
+      }
+
+      for (const result of results) {
+        if (result.status === "fulfilled") {
+          setLastJob(result.value.status);
+        }
+      }
+
+      let hasTerminalUpdate = false;
+      let hasProgressUpdate = false;
+      setUploadQueue((current) =>
+        current.map((item) => {
+          if (item.status !== "polling" || !item.jobId) {
+            return item;
+          }
+
+          const response = results.find((result) => {
+            if (result.status !== "fulfilled") {
+              return false;
+            }
+            return result.value.itemId === item.id;
+          });
+
+          if (!response || response.status !== "fulfilled") {
+            return item;
+          }
+
+          const nextStatus = response.value.status;
+
+          if (!TERMINAL_JOB_STATES.has(nextStatus.status)) {
+            const nextMessage = nextStatus.message ?? null;
+            if (item.backendStatus === nextStatus.status && item.message === nextMessage) {
+              return item;
+            }
+
+            hasProgressUpdate = true;
+            return {
+              ...item,
+              backendStatus: nextStatus.status,
+              message: nextMessage
+            };
+          }
+
+          hasTerminalUpdate = true;
+          return {
+            ...item,
+            backendStatus: nextStatus.status,
+            status: nextStatus.status === "completed" ? "completed" : "failed",
+            message: nextStatus.message ?? null
+          };
+        })
+      );
+
+      if (hasProgressUpdate || hasTerminalUpdate) {
+        await queryClient.invalidateQueries({ queryKey: ["documents"] });
+        if (selectedDocumentId) {
+          await queryClient.invalidateQueries({ queryKey: ["document-detail", selectedDocumentId] });
+        }
+      }
+
+      if (hasTerminalUpdate) {
+        await queryClient.invalidateQueries({ queryKey: ["jobs"] });
+        await queryClient.invalidateQueries({ queryKey: ["entity-search"] });
+      }
+    };
+
+    void pollOnce();
+    const timer = window.setInterval(() => {
+      void pollOnce();
+    }, JOB_POLL_INTERVAL_MS);
 
     return () => {
-      window.clearTimeout(timeoutId);
+      cancelled = true;
+      window.clearInterval(timer);
     };
-  }, [activeJobId, jobStartedAt]);
-
-  useEffect(() => {
-    if (!jobQuery.data) {
-      return;
-    }
-
-    setLastJob(jobQuery.data);
-
-    if (TERMINAL_JOB_STATES.has(jobQuery.data.status)) {
-      setActiveJobId(null);
-      setJobStartedAt(null);
-      setPollTimedOut(false);
-      void queryClient.invalidateQueries({ queryKey: ["documents"] });
-      void queryClient.invalidateQueries({ queryKey: ["entity-search"] });
-    }
-  }, [jobQuery.data, queryClient]);
+  }, [pollingQueueItems, queryClient, selectedDocumentId]);
 
   useEffect(() => {
     if (!inspectDocumentIdFromQuery) {
@@ -266,39 +347,85 @@ export function DocumentsPage(): JSX.Element {
     }
   }, [inspectDocumentIdFromQuery, selectedDocumentId]);
 
-  const uploadMutation = useMutation({
-    mutationFn: async (): Promise<JobStatus> => {
-      if (!selectedFile) {
-        throw new Error("Please choose a .txt or .pdf file.");
+  const uploadAllMutation = useMutation({
+    mutationFn: async (): Promise<void> => {
+      const itemsToUpload = uploadQueue.filter(
+        (item) =>
+          item.validationError === null &&
+          (item.status === "queued" || item.status === "failed")
+      );
+
+      if (itemsToUpload.length === 0) {
+        return;
       }
 
-      const documentType = detectDocumentType(selectedFile);
-      if (!documentType) {
-        throw new Error("Unsupported document type.");
-      }
+      setIsUploadingQueue(true);
 
-      if (documentType === "text") {
-        return apiClient.uploadTextDocument(selectedFile, makePublic);
-      }
+      for (const item of itemsToUpload) {
+        setUploadQueue((current) =>
+          current.map((entry) =>
+            entry.id === item.id
+              ? {
+                  ...entry,
+                  status: "uploading",
+                  message: null
+                }
+              : entry
+          )
+        );
 
-      return apiClient.uploadPdfDocument(selectedFile, makePublic);
+        try {
+          const documentType = item.type ?? detectDocumentType(item.file);
+          if (!documentType) {
+            throw new Error("Unsupported document type.");
+          }
+
+          const jobStatus =
+            documentType === "text"
+              ? await apiClient.uploadTextDocument(item.file, makePublic)
+              : await apiClient.uploadPdfDocument(item.file, makePublic);
+
+          setLastJob(jobStatus);
+          setUploadQueue((current) =>
+            current.map((entry) => {
+              if (entry.id !== item.id) {
+                return entry;
+              }
+
+              const isTerminal = TERMINAL_JOB_STATES.has(jobStatus.status);
+              return {
+                ...entry,
+                jobId: jobStatus.job_id,
+                backendStatus: jobStatus.status,
+                status: isTerminal
+                  ? jobStatus.status === "completed"
+                    ? "completed"
+                    : "failed"
+                  : "polling",
+                message: jobStatus.message ?? null
+              };
+            })
+          );
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Upload failed.";
+          setUploadQueue((current) =>
+            current.map((entry) =>
+              entry.id === item.id
+                ? {
+                    ...entry,
+                    status: "failed",
+                    message
+                  }
+                : entry
+            )
+          );
+        }
+      }
     },
-    onSuccess: async (jobStatus) => {
-      setLastJob(jobStatus);
-      setSelectedFile(null);
-      setSelectedFileError(null);
-
-      if (TERMINAL_JOB_STATES.has(jobStatus.status)) {
-        setActiveJobId(null);
-        setJobStartedAt(null);
-        setPollTimedOut(false);
-      } else {
-        setActiveJobId(jobStatus.job_id);
-        setJobStartedAt(Date.now());
-        setPollTimedOut(false);
-      }
-
+    onSettled: async () => {
+      setIsUploadingQueue(false);
       await queryClient.invalidateQueries({ queryKey: ["documents"] });
+      await queryClient.invalidateQueries({ queryKey: ["jobs"] });
     }
   });
 
@@ -414,23 +541,51 @@ export function DocumentsPage(): JSX.Element {
     }
   });
 
+  const addFilesToQueue = (files: File[]): void => {
+    if (files.length === 0) {
+      return;
+    }
+
+    const nextItems = files.map((file) => buildUploadQueueItem(file));
+    setUploadQueue((current) => [...current, ...nextItems]);
+  };
+
   const onFileChange = (event: ChangeEvent<HTMLInputElement>): void => {
-    const file = event.target.files?.[0];
-    if (!file) {
-      setSelectedFile(null);
-      setSelectedFileError(null);
-      return;
-    }
+    const files = event.target.files ? [...event.target.files] : [];
+    addFilesToQueue(files);
+    event.target.value = "";
+  };
 
-    const validationError = validateFile(file);
-    if (validationError) {
-      setSelectedFile(null);
-      setSelectedFileError(validationError);
-      return;
-    }
+  const onDropFiles = (event: DragEvent<HTMLDivElement>): void => {
+    event.preventDefault();
+    const files = [...event.dataTransfer.files];
+    addFilesToQueue(files);
+  };
 
-    setSelectedFile(file);
-    setSelectedFileError(null);
+  const onDragOver = (event: DragEvent<HTMLDivElement>): void => {
+    event.preventDefault();
+  };
+
+  const onRemoveQueueItem = (itemId: string): void => {
+    setUploadQueue((current) => current.filter((item) => item.id !== itemId));
+  };
+
+  const onRetryQueueItem = (itemId: string): void => {
+    setUploadQueue((current) =>
+      current.map((item) =>
+        item.id === itemId
+          ? {
+              ...item,
+              status: "queued",
+              message: null
+            }
+          : item
+      )
+    );
+  };
+
+  const onUploadAll = (): void => {
+    void uploadAllMutation.mutateAsync();
   };
 
   const rows = useMemo(() => {
@@ -456,6 +611,36 @@ export function DocumentsPage(): JSX.Element {
     }
     return count;
   }, [selectedSeedDocumentIds, selectableSeedDocumentIds]);
+
+  const uploadQueueSummary = useMemo(() => {
+    const summary = {
+      total: uploadQueue.length,
+      queued: 0,
+      uploading: 0,
+      polling: 0,
+      completed: 0,
+      failed: 0
+    };
+
+    for (const item of uploadQueue) {
+      if (item.status === "queued") summary.queued += 1;
+      if (item.status === "uploading") summary.uploading += 1;
+      if (item.status === "polling") summary.polling += 1;
+      if (item.status === "completed") summary.completed += 1;
+      if (item.status === "failed") summary.failed += 1;
+    }
+
+    return summary;
+  }, [uploadQueue]);
+
+  const hasUploadableQueueItems = useMemo(
+    () =>
+      uploadQueue.some(
+        (item) =>
+          item.validationError === null && (item.status === "queued" || item.status === "failed")
+      ),
+    [uploadQueue]
+  );
 
   useEffect(() => {
     setSelectedSeedDocumentIds((current) => {
@@ -632,57 +817,41 @@ export function DocumentsPage(): JSX.Element {
 
       <Card variant="outlined">
         <CardContent sx={{ position: "relative" }}>
-          {activeJobId && (
-            <Chip
-              color="info"
-              variant="outlined"
-              icon={<CircularProgress size={14} sx={{ color: "info.main" }} />}
-              label={`Polling ${activeJobId}`}
-              sx={{
-                display: { xs: "none", sm: "inline-flex" },
-                position: "absolute",
-                top: 16,
-                right: 16,
-                maxWidth: 280,
-                "& .MuiChip-label": {
-                  overflow: "hidden",
-                  textOverflow: "ellipsis"
-                }
-              }}
-            />
-          )}
-
           <Typography variant="h6" sx={{ fontWeight: 700, mb: 1 }}>
             Upload Workspace
           </Typography>
           <Typography color="text.secondary" sx={{ mb: 2 }}>
-            Uploading returns a job id (`202`) and processing continues asynchronously. This page polls
-            /jobs/&#123;id&#125; until completion.
+            Add multiple files, then start a sequential upload queue. Processing jobs continue in the background.
           </Typography>
 
-          {activeJobId && (
-            <Stack
-              direction="row"
-              spacing={1}
-              alignItems="center"
-              sx={{ mb: 2, display: { xs: "flex", sm: "none" } }}
-            >
-              <CircularProgress size={16} />
-              <Typography variant="body2">Polling job {activeJobId}...</Typography>
+          <Box
+            data-testid="upload-dropzone"
+            sx={{
+              border: "1px dashed #9eb4da",
+              borderRadius: 2,
+              p: 2,
+              mb: 2,
+              background: "linear-gradient(180deg, #ffffff 0%, #f8fbff 100%)"
+            }}
+            onDrop={onDropFiles}
+            onDragOver={onDragOver}
+          >
+            <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} alignItems={{ sm: "center" }}>
+              <Typography variant="body2" color="text.secondary" sx={{ flex: 1 }}>
+                Drag and drop `.txt`/`.pdf` files here, or choose multiple files.
+              </Typography>
+              <Button variant="outlined" component="label" startIcon={<UploadFileIcon />}>
+                Add Files
+                <input hidden multiple accept=".txt,.pdf,text/plain,application/pdf" type="file" onChange={onFileChange} />
+              </Button>
             </Stack>
-          )}
+          </Box>
 
-          <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }}>
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }} sx={{ mb: 2 }}>
             <Button variant="outlined" component="label" startIcon={<UploadFileIcon />}>
-              Choose .txt or .pdf
-              <input hidden accept=".txt,.pdf,text/plain,application/pdf" type="file" onChange={onFileChange} />
+              Add More
+              <input hidden multiple accept=".txt,.pdf,text/plain,application/pdf" type="file" onChange={onFileChange} />
             </Button>
-
-            <Typography variant="body2" color="text.secondary">
-              {selectedFile
-                ? `${selectedFile.name} (${formatBytes(selectedFile.size)})`
-                : "No file selected"}
-            </Typography>
 
             <Stack direction="row" spacing={1} alignItems="center">
               <Typography variant="body2" color="text.secondary">
@@ -693,38 +862,71 @@ export function DocumentsPage(): JSX.Element {
 
             <Button
               variant="contained"
-              onClick={() => uploadMutation.mutate()}
-              disabled={!selectedFile || uploadMutation.isPending || Boolean(selectedFileError)}
+              onClick={onUploadAll}
+              disabled={!hasUploadableQueueItems || isUploadingQueue}
             >
-              {uploadMutation.isPending ? "Uploading..." : "Upload"}
+              {isUploadingQueue ? "Uploading..." : "Upload All"}
             </Button>
           </Stack>
 
-          {selectedFileError && <Alert sx={{ mt: 2 }} severity="error">{selectedFileError}</Alert>}
-          {uploadMutation.error instanceof Error && (
+          <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mb: 2 }}>
+            <Chip size="small" label={`Total ${uploadQueueSummary.total}`} />
+            <Chip size="small" label={`Queued ${uploadQueueSummary.queued}`} />
+            <Chip size="small" label={`Uploading ${uploadQueueSummary.uploading}`} />
+            <Chip size="small" label={`Processing ${uploadQueueSummary.polling}`} />
+            <Chip size="small" color="success" label={`Done ${uploadQueueSummary.completed}`} />
+            <Chip size="small" color="error" label={`Failed ${uploadQueueSummary.failed}`} />
+          </Stack>
+
+          {uploadAllMutation.error instanceof Error && (
             <Alert sx={{ mt: 2 }} severity="error">
-              {uploadMutation.error.message}
+              {uploadAllMutation.error.message}
             </Alert>
           )}
 
-          {(uploadMutation.data || lastJob) && (
-            <Alert sx={{ mt: 2 }} severity={(lastJob ?? uploadMutation.data)?.status === "failed" ? "error" : "info"}>
-              Latest job: {(lastJob ?? uploadMutation.data)?.job_id} - status {(lastJob ?? uploadMutation.data)?.status}
-              {(lastJob ?? uploadMutation.data)?.message ? ` - ${(lastJob ?? uploadMutation.data)?.message}` : ""}
+          {lastJob && (
+            <Alert sx={{ mt: 2 }} severity={lastJob.status === "failed" ? "error" : "info"}>
+              Latest job: {lastJob.job_id} - status {lastJob.status}
+              {lastJob.message ? ` - ${lastJob.message}` : ""}
             </Alert>
           )}
 
-          {pollTimedOut && activeJobId && (
-            <Alert sx={{ mt: 2 }} severity="warning">
-              Job {activeJobId} is still running after 5 minutes. You can continue working and refresh later.
-            </Alert>
-          )}
-
-          {jobQuery.error instanceof Error && (
-            <Alert sx={{ mt: 2 }} severity="error">
-              {jobQuery.error.message}
-            </Alert>
-          )}
+          <List dense sx={{ border: "1px solid #e1e7f3", borderRadius: 1, maxHeight: 260, overflowY: "auto" }}>
+            {uploadQueue.map((item) => (
+              <ListItem key={item.id} disableGutters>
+                <Stack spacing={0.6} sx={{ width: "100%" }}>
+                  <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                    {item.file.name} ({formatBytes(item.file.size)})
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    {item.validationError
+                      ? item.validationError
+                      : `status: ${item.status}${item.backendStatus ? ` (${item.backendStatus})` : ""}`}
+                  </Typography>
+                  {item.message && (
+                    <Typography variant="caption" color="text.secondary">
+                      {item.message}
+                    </Typography>
+                  )}
+                  <Stack direction="row" spacing={1}>
+                    <Button size="small" variant="outlined" onClick={() => onRemoveQueueItem(item.id)} disabled={item.status === "uploading"}>
+                      Remove
+                    </Button>
+                    {item.status === "failed" && item.validationError === null && (
+                      <Button size="small" variant="outlined" onClick={() => onRetryQueueItem(item.id)}>
+                        Retry
+                      </Button>
+                    )}
+                  </Stack>
+                </Stack>
+              </ListItem>
+            ))}
+            {uploadQueue.length === 0 && (
+              <ListItem disableGutters>
+                <ListItemText primary="Queue is empty." />
+              </ListItem>
+            )}
+          </List>
         </CardContent>
       </Card>
 

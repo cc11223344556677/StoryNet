@@ -167,7 +167,8 @@ describe("project graph global inspect", () => {
     renderPage();
     await runGlobalInspectSearch("Marko");
 
-    expect(await screen.findByTestId("graph-renderer")).toBeInTheDocument();
+    expect(await screen.findByTestId("graph-renderer")).toHaveTextContent("nodes:1; edges:0");
+    expect(screen.getByText("Focused Inspect View")).toBeInTheDocument();
     expect(screen.queryByText(/Could not load live relationships for this entity/i)).not.toBeInTheDocument();
     expect(mockApiClient.getEntityRelationships).toHaveBeenCalledWith(
       "afa5a9d77ad726ee2c99d9e691db42b74300e805",
@@ -199,7 +200,7 @@ describe("project graph global inspect", () => {
     renderPage();
     await runGlobalInspectSearch("Marko");
 
-    expect(await screen.findByTestId("graph-renderer")).toBeInTheDocument();
+    expect(await screen.findByTestId("graph-renderer")).toHaveTextContent("nodes:1; edges:0");
     expect(mockApiClient.getRelationship).not.toHaveBeenCalled();
     expect(mockApiClient.getRelationshipDocuments).not.toHaveBeenCalled();
     expect(screen.queryByText(/Relationship metadata is temporarily unavailable/i)).not.toBeInTheDocument();
